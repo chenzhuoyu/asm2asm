@@ -1390,14 +1390,14 @@ REG_MAP = {
     'rcx'  : ('MOVQ'  , 'CX'),
     'r8'   : ('MOVQ'  , 'R8'),
     'r9'   : ('MOVQ'  , 'R9'),
-    'xmm0' : ('MOVOU' , 'X0'),
-    'xmm1' : ('MOVOU' , 'X1'),
-    'xmm2' : ('MOVOU' , 'X2'),
-    'xmm3' : ('MOVOU' , 'X3'),
-    'xmm4' : ('MOVOU' , 'X4'),
-    'xmm5' : ('MOVOU' , 'X5'),
-    'xmm6' : ('MOVOU' , 'X6'),
-    'xmm7' : ('MOVOU' , 'X7'),
+    'xmm0' : ('MOVSD' , 'X0'),
+    'xmm1' : ('MOVSD' , 'X1'),
+    'xmm2' : ('MOVSD' , 'X2'),
+    'xmm3' : ('MOVSD' , 'X3'),
+    'xmm4' : ('MOVSD' , 'X4'),
+    'xmm5' : ('MOVSD' , 'X5'),
+    'xmm6' : ('MOVSD' , 'X6'),
+    'xmm7' : ('MOVSD' , 'X7'),
 }
 
 class Counter:
