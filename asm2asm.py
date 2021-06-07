@@ -391,16 +391,21 @@ class Instruction:
         def __init__(self, *args, **kwargs):
             super().__init__(3, *args, **kwargs)
 
+    class VCMPTRUEPS(x86_64.VCMPPS):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*(args + (0x0f,)), **kwargs)
+
     __instr_map__ = {
-        'INT3'    : INT3,
-        'CLTQ'    : x86_64.CDQE,
-        'MOVZBL'  : x86_64.MOVZX,
-        'MOVZWL'  : x86_64.MOVZX,
-        'MOVSBL'  : x86_64.MOVSX,
-        'MOVSWL'  : x86_64.MOVSX,
-        'MOVSBQ'  : x86_64.MOVSX,
-        'MOVSLQ'  : x86_64.MOVSXD,
-        'MOVABSQ' : x86_64.MOV,
+        'INT3'       : INT3,
+        'CLTQ'       : x86_64.CDQE,
+        'MOVZBL'     : x86_64.MOVZX,
+        'MOVZWL'     : x86_64.MOVZX,
+        'MOVSBL'     : x86_64.MOVSX,
+        'MOVSWL'     : x86_64.MOVSX,
+        'MOVSBQ'     : x86_64.MOVSX,
+        'MOVSLQ'     : x86_64.MOVSXD,
+        'MOVABSQ'    : x86_64.MOV,
+        'VCMPTRUEPS' : VCMPTRUEPS,
     }
 
     @functools.cached_property
