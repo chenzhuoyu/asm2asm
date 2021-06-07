@@ -19,6 +19,7 @@ from typing import Optional
 
 from peachpy import x86_64
 from peachpy.x86_64 import generic
+from peachpy.x86_64 import XMMRegister
 from peachpy.x86_64.operand import MemoryOperand
 from peachpy.x86_64.operand import MemoryAddress
 from peachpy.x86_64.operand import RIPRelativeOffset
@@ -399,8 +400,17 @@ class Instruction:
         def __init__(self, *args, **kwargs):
             super().__init__(*(args + (0x0f,)), **kwargs)
 
+    class Special:
+        @staticmethod
+        def MOVQ(*args, **kwargs):
+            if not any(isinstance(v, XMMRegister) for v in args):
+                return x86_64.MOV(*args, **kwargs)
+            else:
+                return x86_64.MOVQ(*args, **kwargs)
+
     __instr_map__ = {
         'INT3'       : INT3,
+        'MOVQ'       : Special.MOVQ,
         'CLTQ'       : x86_64.CDQE,
         'MOVZBL'     : x86_64.MOVZX,
         'MOVZWL'     : x86_64.MOVZX,
@@ -416,15 +426,15 @@ class Instruction:
     @functools.cached_property
     def _instr(self) -> Type[PInstr]:
         name = self.mnemonic.upper()
-        func = getattr(x86_64, name, None)
+        func = self.__instr_map__.get(name)
+
+        # not found, resolve as x86_64 instruction
+        if func is None:
+            func = getattr(x86_64, name, None)
 
         # try with size suffix removed (only for generic instructions)
-        if name[-1] in 'BWLQ':
+        if func is None and name[-1] in 'BWLQ':
             func = getattr(generic, name[:-1], func)
-
-        # not found, maybe they have a different name
-        if func is None:
-            func = self.__instr_map__.get(name)
 
         # still not found, it should be an error
         if func is None:
@@ -617,7 +627,10 @@ class Instruction:
 
     @functools.cached_property
     def is_branch(self) -> bool:
-        return self.is_invoke or issubclass(self._instr, BranchInstruction)
+        try:
+            return self.is_invoke or issubclass(self._instr, BranchInstruction)
+        except TypeError:
+            return False
 
     @functools.cached_property
     def is_branch_jmp(self) -> bool:
