@@ -1546,7 +1546,8 @@ class CodeSection:
     # operand is an RIP relative addressing memory operand
 
     __instr_repl__ = {
-        'vmovdqa': 'vmovdqu',
+        'movdqa'  : 'movdqu',
+        'vmovdqa' : 'vmovdqu',
     }
 
     def _check_aligned(self, instr: Instruction):
