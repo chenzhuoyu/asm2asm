@@ -392,7 +392,7 @@ class Instruction:
         def __init__(self, *args, **kwargs):
             super().__init__(3, *args, **kwargs)
 
-    class VCMPEQPD(x86_64.VCMPPD):
+    class VCMPEQPS(x86_64.VCMPPS):
         def __init__(self, *args, **kwargs):
             super().__init__(*(args + (0x00,)), **kwargs)
 
@@ -419,7 +419,7 @@ class Instruction:
         'MOVSBQ'     : x86_64.MOVSX,
         'MOVSLQ'     : x86_64.MOVSXD,
         'MOVABSQ'    : x86_64.MOV,
-        'VCMPEQPD'   : VCMPEQPD,
+        'VCMPEQPS'   : VCMPEQPS,
         'VCMPTRUEPS' : VCMPTRUEPS,
     }
 
