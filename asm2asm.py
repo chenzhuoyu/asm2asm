@@ -411,12 +411,19 @@ class Instruction:
     __instr_map__ = {
         'INT3'       : INT3,
         'MOVQ'       : Special.MOVQ,
+        'CBTW'       : x86_64.CBW,
+        'CWTL'       : x86_64.CWDE,
         'CLTQ'       : x86_64.CDQE,
+        'MOVZBW'     : x86_64.MOVZX,
         'MOVZBL'     : x86_64.MOVZX,
         'MOVZWL'     : x86_64.MOVZX,
+        'MOVZBQ'     : x86_64.MOVZX,
+        'MOVZWQ'     : x86_64.MOVZX,
+        'MOVSBW'     : x86_64.MOVSX,
         'MOVSBL'     : x86_64.MOVSX,
         'MOVSWL'     : x86_64.MOVSX,
         'MOVSBQ'     : x86_64.MOVSX,
+        'MOVSWQ'     : x86_64.MOVSX,
         'MOVSLQ'     : x86_64.MOVSXD,
         'MOVABSQ'    : x86_64.MOV,
         'VCMPEQPS'   : VCMPEQPS,
@@ -453,6 +460,10 @@ class Instruction:
         ops = self.operands
         key = self.mnemonic.upper()
 
+        # special case of sign/zero extension instructions
+        if key in self.__instr_size__:
+            return self.__instr_size__[key]
+
         # check for register operands
         for op in ops:
             if isinstance(op, Register):
@@ -469,6 +480,20 @@ class Instruction:
         'W': 2,
         'L': 4,
         'Q': 8,
+    }
+
+    __instr_size__ = {
+        'MOVZBW' : 1,
+        'MOVZBL' : 1,
+        'MOVZWL' : 2,
+        'MOVZBQ' : 1,
+        'MOVZWQ' : 2,
+        'MOVSBW' : 1,
+        'MOVSBL' : 1,
+        'MOVSWL' : 2,
+        'MOVSBQ' : 1,
+        'MOVSWQ' : 2,
+        'MOVSLQ' : 4,
     }
 
     # it seems that Go ASM cannot handle these instructions correctly, so we
