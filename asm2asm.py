@@ -1645,6 +1645,8 @@ class CodeSection:
             if self._is_rjump(blk.last):
                 blk.last.size += adj
 
+STUB_NAME = '__native_entry__'
+
 class Assembler:
     out  : List[str]
     subr : Dict[str, int]
@@ -1854,7 +1856,7 @@ class Assembler:
         self._declare_functions(protos)
 
     def _declare_body(self):
-        self.out.append('TEXT ·___asm2asm_compiled_code__DO_NOT_CALL_THIS_SYMBOL___(SB), NOSPLIT, $0')
+        self.out.append('TEXT ·%s(SB), NOSPLIT, $0' % STUB_NAME)
         self.code.layout()
         self._reloc()
         self.out.extend(v.formatted for v in self.code.instrs)
@@ -1877,13 +1879,13 @@ class Assembler:
 
         # the function starts at zero
         if addr == 0 and proto.retv is None:
-            self.out.append('\tJMP ·___asm2asm_compiled_code__DO_NOT_CALL_THIS_SYMBOL___(SB)  // ' + subr)
+            self.out.append('\tJMP ·%s(SB)  // %s' % (STUB_NAME, subr))
             return
 
         # Go ASM completely ignores the offset of the JMP instruction,
         # so we need to use indirect jumps instead for tail-call elimination
         if proto.retv is None:
-            self.out.append('\tLEAQ ·___asm2asm_compiled_code__DO_NOT_CALL_THIS_SYMBOL___+%d(SB), AX  // %s' % (addr, subr))
+            self.out.append('\tLEAQ ·%s+%d(SB), AX  // %s' % (STUB_NAME, addr, subr))
             self.out.append('\tJMP AX')
             return
 
@@ -1892,7 +1894,7 @@ class Assembler:
         inst, regv = REG_MAP[rreg]
 
         # call the real function, and return the result
-        self.out.append('\tCALL ·___asm2asm_compiled_code__DO_NOT_CALL_THIS_SYMBOL___+%d(SB)  // %s' % (addr, subr))
+        self.out.append('\tCALL ·%s+%d(SB)  // %s' % (STUB_NAME, addr, subr))
         self.out.append('\t%s %s, %s+%d(FP)' % (inst, regv, proto.retv.name, offs))
         self.out.append('\tRET')
 
@@ -1901,9 +1903,12 @@ class Assembler:
             if name[0] == '_':
                 self._declare_function(name, proto)
             else:
-                raise SyntaxError('invalid function prototype name: ' + repr(name))
+                raise SyntaxError('function prototype must have a "_" prefix: ' + repr(name))
 
     def parse(self, src: List[str], proto: PrototypeMap):
+        self.code.instr(Instruction('leaq', [Memory(Register('rip'), Immediate(-7), None), Register('rax')]))
+        self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
+        self.code.instr(Instruction('retq', []))
         self._parse(src)
         self._declare(proto)
 
@@ -2010,32 +2015,21 @@ def main():
         print('package %s' % pkg, file = fp)
         print(file = fp)
 
-        # import "unsafe" if there are subroutines
-        if asm.subr:
-            print('import (', file = fp)
-            print('    `unsafe`', file = fp)
-            print(')', file = fp)
-            print(file = fp)
-
-        # the function stbu
+        # the function stub
         print('//go:nosplit', file = fp)
         print('//go:noescape', file = fp)
         print('//goland:noinspection ALL', file = fp)
-        print('func ___asm2asm_compiled_code__DO_NOT_CALL_THIS_SYMBOL___()', file = fp)
+        print('func %s() uintptr' % STUB_NAME, file = fp)
 
         # also save the actual function addresses if any
         if asm.subr:
-            mlen = max(len(s) for s in asm.subr)
-            base = '_func__base'.ljust(mlen + 6, ' ')
-
-            # function base
             print(file = fp)
             print('var (', file = fp)
-            print('    %s = ___asm2asm_compiled_code__DO_NOT_CALL_THIS_SYMBOL___' % base, file = fp)
+            mlen = max(len(s) for s in asm.subr)
 
             # dump every function
             for name, offs in asm.subr.items():
-                print('    _subr_%s = **(**uintptr)(unsafe.Pointer(&_func__base)) + %d' % (name.ljust(mlen, ' '), offs), file = fp)
+                print('    _subr_%s = %s() + %d' % (name.ljust(mlen, ' '), STUB_NAME, offs), file = fp)
             else:
                 print(')', file = fp)
 
