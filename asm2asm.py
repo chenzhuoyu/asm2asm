@@ -1040,10 +1040,10 @@ class PrototypeMap(Dict[str, Prototype]):
                 raise SyntaxError('badly formatted return argument (please use parenthesis and proper arguments naming): ' + func)
 
             # extract the argument list
-            args, alens, axmm = list(zip(*[
-                cls._args(v.strip())
-                for v in args[:-1].split(',')
-            ]))
+            if not args[:-1]:
+                args, alens, axmm = [], [], []
+            else:
+                args, alens, axmm = list(zip(*[cls._args(v.strip()) for v in args[:-1].split(',')]))
 
             # check for the result
             regs = []
