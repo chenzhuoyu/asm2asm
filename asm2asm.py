@@ -1457,8 +1457,7 @@ class Counter:
         return val
 
 class BasicBlock:
-    insp: int
-    slen: int
+    pcsp: int
     name: str
     weak: bool
     body: List[Instr]
@@ -1467,8 +1466,7 @@ class BasicBlock:
     jump: Optional['BasicBlock']
 
     def __init__(self, name: str, weak: bool = True):
-        self.slen = 0
-        self.insp = -1
+        self.pcsp = -1
         self.body = []
         self.prev = []
         self.name = name
@@ -1546,6 +1544,28 @@ class CodeSection:
         self.blocks.append(block)
 
     @staticmethod
+    def _mk_align(v: int) -> int:
+        if v & 7 == 0:
+            return v
+        else:
+            print('* warning: SP is not aligned with 8 bytes.', file = sys.stderr)
+            return (v + 7) & -8
+
+    @staticmethod
+    def _is_spadj(ins: Instruction) -> bool:
+        return len(ins.operands) == 2                 and \
+               isinstance(ins.operands[0], Immediate) and \
+               isinstance(ins.operands[1], Register)  and \
+               ins.operands[1].reg == 'rsp'
+
+    @staticmethod
+    def _is_spmove(ins: Instruction, i: int) -> bool:
+        return len(ins.operands) == 2                and \
+               isinstance(ins.operands[0], Register) and \
+               isinstance(ins.operands[1], Register) and \
+               ins.operands[i].reg == 'rsp'
+
+    @staticmethod
     def _is_rjump(ins: Optional[Instr]) -> bool:
         return isinstance(ins, X86Instr) and ins.instr.is_branch_label
 
@@ -1558,14 +1578,6 @@ class CodeSection:
         else:
             raise SyntaxError('unresolved reference to name: ' + name)
 
-    def _check_split(self, instr: Instruction):
-        if instr.is_return:
-            self.dead = True
-        elif instr.is_branch_label and instr.is_branch_jmp:
-            self._kill(instr.operands[0].name)
-        elif instr.is_branch_label:
-            self._split(instr.operands[0].name, BasicBlock.annonymous())
-
     # it seems to not be able to specify function aligment inside the Go ASM so we
     # need to replace the aligned instructions with unaligned one if either of it's
     # operand is an RIP relative addressing memory operand
@@ -1575,13 +1587,79 @@ class CodeSection:
         'vmovdqa' : 'vmovdqu',
     }
 
-    def _check_aligned(self, instr: Instruction):
+    def _check_align(self, instr: Instruction):
         if instr.mnemonic in self.__instr_repl__:
             for op in instr.operands:
                 if isinstance(op, Memory):
                     if op.base is not None and op.base.reg == 'rip':
                         instr.mnemonic = self.__instr_repl__[instr.mnemonic]
                         break
+
+    def _check_split(self, instr: Instruction):
+        if instr.is_return:
+            self.dead = True
+        elif instr.is_branch_label and instr.is_branch_jmp:
+            self._kill(instr.operands[0].name)
+        elif instr.is_branch_label:
+            self._split(instr.operands[0].name, BasicBlock.annonymous())
+
+    def _trace_block(self, bb: BasicBlock) -> int:
+        if bb.pcsp == -1:
+            return self._trace_nocache(bb)
+        elif bb.pcsp >= 0:
+            return bb.pcsp
+        else:
+            return 0
+
+    def _trace_nocache(self, bb: BasicBlock) -> int:
+        bb.pcsp = -2
+        sp, term = self._trace_instructions(bb)
+
+        # this is a terminating block
+        if term:
+            return sp
+
+        # don't trace it's next block if it's an unconditional jump
+        a = self._trace_block(bb.jump) if bb.jump else 0
+        b = self._trace_block(bb.next) if bb.next else 0
+
+        # select the maximum stack depth
+        bb.pcsp = sp + max(a, b)
+        return bb.pcsp
+
+    def _trace_instructions(self, bb: BasicBlock) -> Tuple[int, bool]:
+        cursp = 0
+        maxsp = 0
+        close = False
+
+        # scan every instruction
+        for ins in bb.body:
+            if isinstance(ins, X86Instr):
+                name = ins.instr.mnemonic
+                args = ins.instr.operands
+
+                # check for instructions
+                if name == 'retq':
+                    close = True
+                elif name == 'popq':
+                    cursp -= 8
+                elif name == 'pushq':
+                    cursp += 8
+                elif name == 'callq':
+                    cursp += 8
+                elif name == 'addq' and self._is_spadj(ins.instr):
+                    cursp -= self._mk_align(args[0].val)
+                elif name == 'subq' and self._is_spadj(ins.instr):
+                    cursp += self._mk_align(args[0].val)
+                elif name == 'andq' and self._is_spadj(ins.instr):
+                    cursp += self._mk_align(max(-args[0].val - 8, 0))
+
+                # update the max stack depth
+                if cursp > maxsp:
+                    maxsp = cursp
+
+        # trace successful
+        return maxsp, close
 
     def get(self, key: str) -> int:
         if key not in self.labels:
@@ -1608,7 +1686,7 @@ class CodeSection:
 
     def instr(self, instr: Instruction):
         if not self.dead:
-            self._check_aligned(instr)
+            self._check_align(instr)
             self.block.body.append(X86Instr(instr))
             self._check_split(instr)
 
@@ -1644,6 +1722,12 @@ class CodeSection:
         for adj, blk in zip(adjs, self.blocks):
             if self._is_rjump(blk.last):
                 blk.last.size += adj
+
+    def stacksize(self, name: str) -> int:
+        if name not in self.labels:
+            raise SyntaxError('undefined function: ' + name)
+        else:
+            return self._trace_block(self.labels[name])
 
 STUB_NAME = '__native_entry__'
 
@@ -1866,10 +1950,11 @@ class Assembler:
         offs = 0
         subr = name[1:]
         addr = self.code.get(subr)
+        size = self.code.stacksize(subr)
 
         # function header
         self.out.append('')
-        self.out.append('TEXT ·%s(SB), NOSPLIT, $0 - %d' % (name, proto.argspace))
+        self.out.append('TEXT ·%s(SB), NOSPLIT, $%d - %d' % (name, size, proto.argspace))
         self.subr[subr] = addr
 
         # intialize all the arguments
@@ -2032,16 +2117,25 @@ def main():
             # dump every function
             for name, offs in asm.subr.items():
                 print('    _subr_%s = %s() + %d' % (name.ljust(mlen, ' '), STUB_NAME, offs), file = fp)
-            else:
-                print(')', file = fp)
+
+            # dump the stack usages
+            print(')', file = fp)
+            print(file = fp)
+            print('const (', file = fp)
+
+            # dump every function
+            for name in asm.subr:
+                print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
 
             # assign to '_' to mute the "unused" warnings
+            print(')', file = fp)
             print(file = fp)
             print('var (', file = fp)
 
             # dump every function
             for name in asm.subr:
                 print('    _ = _subr_%s' % name, file = fp)
+                print('    _ = _stack_%s' % name, file = fp)
             else:
                 print(')', file = fp)
 
