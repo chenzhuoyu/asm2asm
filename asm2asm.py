@@ -2130,14 +2130,11 @@ def main():
             # assign to '_' to mute the "unused" warnings
             print(')', file = fp)
             print(file = fp)
-            print('var (', file = fp)
 
             # dump every function
             for name in asm.subr:
-                print('    _ = _subr_%s' % name, file = fp)
-                print('    _ = _stack_%s' % name, file = fp)
-            else:
-                print(')', file = fp)
+                print('var   _ = _subr_%s' % name, file = fp)
+                print('const _ = _stack_%s' % name, file = fp)
 
 if __name__ == '__main__':
     main()
