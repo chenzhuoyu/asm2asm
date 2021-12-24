@@ -2123,18 +2123,29 @@ def main():
             print(file = fp)
             print('const (', file = fp)
 
-            # dump every function
+            # dump every constant
             for name in asm.subr:
                 print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
 
-            # assign to '_' to mute the "unused" warnings
+            # assign subroutine offsets to '_' to mute the "unused" warnings
             print(')', file = fp)
             print(file = fp)
+            print('var (', file = fp)
 
             # dump every function
             for name in asm.subr:
-                print('var   _ = _subr_%s' % name, file = fp)
-                print('const _ = _stack_%s' % name, file = fp)
+                print('    _ = _subr_%s' % name, file = fp)
+
+            # assign stack usages to '_' to mute the "unused" warnings
+            print(')', file = fp)
+            print(file = fp)
+            print('const (', file = fp)
+
+            # dump every constant
+            for name in asm.subr:
+                print('    _ = _stack_%s' % name, file = fp)
+            else:
+                print(')', file = fp)
 
 if __name__ == '__main__':
     main()
