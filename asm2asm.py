@@ -1585,6 +1585,8 @@ class CodeSection:
     __instr_repl__ = {
         'movdqa'  : 'movdqu',
         'vmovdqa' : 'vmovdqu',
+        'vmovaps' : 'vmovups',
+        'vmovapd' : 'vmovupd',
     }
 
     def _check_align(self, instr: Instruction):
