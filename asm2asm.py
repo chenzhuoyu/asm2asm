@@ -1954,10 +1954,24 @@ class Assembler:
         addr = self.code.get(subr)
         size = self.code.stacksize(subr)
 
-        # function header
+        # function header and stack checking
         self.out.append('')
-        self.out.append('TEXT ·%s(SB), NOSPLIT, $%d - %d' % (name, size, proto.argspace))
+        self.out.append('TEXT ·%s(SB), NOSPLIT | NOFRAME, $0 - %d' % (name, proto.argspace))
+        self.out.append('\tNO_LOCAL_POINTERS')
         self.subr[subr] = addr
+
+        # add stack check if needed
+        if size != 0:
+            self.out.append('')
+            self.out.append('_entry:')
+            self.out.append('\tMOVQ (TLS), R14')
+            self.out.append('\tLEAQ -%d(SP), R12' % size)
+            self.out.append('\tCMPQ R12, 16(R14)')
+            self.out.append('\tJBE  _stack_grow')
+
+        # function name
+        self.out.append('')
+        self.out.append('%s:' % subr)
 
         # intialize all the arguments
         for arg in proto.args:
@@ -1968,23 +1982,25 @@ class Assembler:
         # the function starts at zero
         if addr == 0 and proto.retv is None:
             self.out.append('\tJMP ·%s(SB)  // %s' % (STUB_NAME, subr))
-            return
 
         # Go ASM completely ignores the offset of the JMP instruction,
         # so we need to use indirect jumps instead for tail-call elimination
-        if proto.retv is None:
+        elif proto.retv is None:
             self.out.append('\tLEAQ ·%s+%d(SB), AX  // %s' % (STUB_NAME, addr, subr))
             self.out.append('\tJMP AX')
-            return
 
-        # map the return register
-        rreg = proto.retv.reg.reg
-        inst, regv = REG_MAP[rreg]
+        # normal functions, call the real function, and return the result
+        else:
+            self.out.append('\tCALL ·%s+%d(SB)  // %s' % (STUB_NAME, addr, subr))
+            self.out.append('\t%s, %s+%d(FP)' % (' '.join(REG_MAP[proto.retv.reg.reg]), proto.retv.name, offs))
+            self.out.append('\tRET')
 
-        # call the real function, and return the result
-        self.out.append('\tCALL ·%s+%d(SB)  // %s' % (STUB_NAME, addr, subr))
-        self.out.append('\t%s %s, %s+%d(FP)' % (inst, regv, proto.retv.name, offs))
-        self.out.append('\tRET')
+        # add stack growing if needed
+        if size != 0:
+            self.out.append('')
+            self.out.append('_stack_grow:')
+            self.out.append('\tCALL runtime·morestack_noctxt<>(SB)')
+            self.out.append('\tJMP  _entry')
 
     def _declare_functions(self, protos: PrototypeMap):
         for name, proto in sorted(protos.items()):
