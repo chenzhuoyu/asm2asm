@@ -1580,7 +1580,7 @@ class CodeSection:
 
     # it seems to not be able to specify function aligment inside the Go ASM so we
     # need to replace the aligned instructions with unaligned one if either of it's
-    # operand is an RIP relative addressing memory operand
+    # operand is an RBP or RIP relative addressing memory operand
 
     __instr_repl__ = {
         'movdqa'  : 'movdqu',
@@ -1593,7 +1593,7 @@ class CodeSection:
         if instr.mnemonic in self.__instr_repl__:
             for op in instr.operands:
                 if isinstance(op, Memory):
-                    if op.base is not None and op.base.reg == 'rip':
+                    if op.base is not None and op.base.reg in ('rip', 'rbp'):
                         instr.mnemonic = self.__instr_repl__[instr.mnemonic]
                         break
 
