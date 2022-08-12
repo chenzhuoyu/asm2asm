@@ -20,6 +20,7 @@ from typing import Optional
 from peachpy import x86_64
 from peachpy.x86_64 import generic
 from peachpy.x86_64 import XMMRegister
+from peachpy.x86_64.operand import is_rel32
 from peachpy.x86_64.operand import MemoryOperand
 from peachpy.x86_64.operand import MemoryAddress
 from peachpy.x86_64.operand import RIPRelativeOffset
@@ -449,12 +450,6 @@ class Instruction:
         else:
             return func
 
-    @functools.cached_property
-    def _is_cmp(self) -> bool:
-        return self.mnemonic in ('cmpb', 'cmpw', 'cmpl', 'cmpq') and \
-               len(self.operands) == 2                           and \
-               not isinstance(self.operands[0], Immediate)
-
     @property
     def _instr_size(self) -> Optional[int]:
         ops = self.operands
@@ -496,28 +491,20 @@ class Instruction:
         'MOVSLQ' : 4,
     }
 
-    # it seems that Go ASM cannot handle these instructions correctly, so we
-    # force them to be encoded as raw bytes
-
-    __instr_raw__ = {
-        'NOP',
-        'INT',
-        'CALL',
-        'POPQ',
-        'PUSHQ',
-    }
-
     @staticmethod
-    def _is_rop(v: Any) -> bool:
-        return v == x86_64.rbp or \
-               isinstance(v, MemoryOperand) and \
-               isinstance(v.address, RIPRelativeOffset)
+    def _encode_r32(ins: PInstr) -> bytes:
+        ret = [fn(ins.operands) for _, fn in ins.encodings]
+        ret.sort(key = len)
+        return ret[-1]
 
     @classmethod
-    def _as_raw(cls, ins: PInstr) -> bool:
-        return ins.go_name is None or \
-               ins.go_name in cls.__instr_raw__ or \
-               any(cls._is_rop(v) for v in ins.operands)
+    def _encode_ins(cls, ins: PInstr, force_rel32: bool = False) -> bytes:
+        if not isinstance(ins, BranchInstruction):
+            return ins.encode()
+        elif not is_rel32(ins.operands[0]) or not force_rel32:
+            return ins.encode()
+        else:
+            return cls._encode_r32(ins)
 
     def _encode_rel(self, rel: Label, sizing: bool, offset: int) -> RIPRelativeOffset:
         if rel.offs is not None:
@@ -589,12 +576,10 @@ class Instruction:
                 raise SyntaxError('cannot encode %s as operand' % repr(op))
 
     def _encode_branch_rel(self, rel: Label) -> str:
-        if self.mnemonic not in ('call', 'callq'):
-            return '%s %s' % (self.mnemonic.upper(), rel.name)
-        elif rel.offs is not None:
+        if rel.offs is not None:
             return self._encode_normal_instr()
         else:
-            raise RuntimeError('invalid CALL instruction')
+            raise RuntimeError('invalid relative branching instruction')
 
     def _encode_branch_mem(self, mem: Memory) -> str:
         raise NotImplementedError('not implemented: memory indirect jump')
@@ -620,16 +605,14 @@ class Instruction:
             raise RuntimeError('invalid operand type ' + repr(self.operands[0]))
 
     def _encode_normal_instr(self) -> str:
-        ops = list(self._encode_operands(False, 0))
-        ret = self._instr(*(ops if self._is_cmp else ops[::-1]))
+        ops = self._encode_operands(False, 0)
+        ret = self._instr(*list(ops)[::-1])
 
-        # attempt to encode to a Go ASM instruction as much as possible
-        if self._as_raw(ret):
-            return self.encode(ret.encode(), str(self))
-        elif self.comments:
-            return '%s  // %s' % (ret.format('go'), self.comments)
+        # encode all instructions as raw bytes
+        if not self.is_branch_label:
+            return self.encode(self._encode_ins(ret), str(self))
         else:
-            return ret.format('go')
+            return self.encode(self._encode_ins(ret, force_rel32 = True), '%s, $%s(%%rip)' % (self, self.operands[0].offs))
 
     @property
     def size(self) -> int:
@@ -666,7 +649,8 @@ class Instruction:
         return self.is_branch and isinstance(self.operands[0], Label)
 
     def encoded_size(self, offset: int) -> int:
-        return len(self._instr(*list(self._encode_operands(True, offset))[::-1]).encode())
+        op = self._encode_operands(True, offset)
+        return len(self._encode_ins(self._instr(*list(op)[::-1]), force_rel32 = True))
 
     @classmethod
     def parse(cls, line: str) -> 'Instruction':
@@ -1355,80 +1339,92 @@ class Expression:
         return self._expr(0, 0, getvalue)
 
 class Instr:
-    sp    : int                     = -1
-    size  : int                     = NotImplemented
+    len   : int                     = NotImplemented
     instr : Union[str, Instruction] = NotImplemented
 
-    @property
-    def formatted(self) -> str:
+    def size(self, pc: int) -> int:
+        return self.len
+
+    def formatted(self, pc: int) -> str:
         raise NotImplementedError
 
 class RawInstr(Instr):
-    size  : int
-    instr : str
-
     def __init__(self, size: int, instr: str):
-        self.size  = size
+        self.len = size
         self.instr = instr
 
-    @property
-    def formatted(self) -> str:
+    def formatted(self, _: int) -> str:
         return '\t' + self.instr
 
 class IntInstr(Instr):
-    size: int
     comm: str
     func: Callable[[], int]
 
     def __init__(self, size: int, func: Callable[[], int], comments: str = ''):
-        self.size = size
+        self.len = size
         self.func = func
         self.comm = comments
 
     @property
     def instr(self) -> str:
-        return Instruction.encode(self.func().to_bytes(self.size, 'little'), self.comm)
+        return Instruction.encode(self.func().to_bytes(self.len, 'little'), self.comm)
 
-    @property
-    def formatted(self) -> str:
+    def formatted(self, _: int) -> str:
         return '\t' + self.instr
 
 class X86Instr(Instr):
-    size  : int
-    instr : Instruction
-
     def __init__(self, instr: Instruction):
-        self.size  = instr.size
+        self.len = instr.size
         self.instr = instr
 
     def resize(self, size: int) -> int:
-        self.size = size
+        self.len = size
         return size
 
-    @property
-    def formatted(self) -> str:
+    def formatted(self, _: int) -> str:
         return '\t' + str(self.instr.encoded)
 
 class LabelInstr(Instr):
     def __init__(self, name: str):
-        self.size  = 0
+        self.len = 0
         self.instr = name
 
-    @property
-    def formatted(self) -> str:
+    def formatted(self, _: int) -> str:
         if self.instr.isidentifier():
             return self.instr + ':'
         else:
             return '_LB_%08x: // %s' % (hash(self.instr) & 0xffffffff, self.instr)
 
+class BranchInstr(Instr):
+    def __init__(self, instr: Instruction):
+        self.len = instr.size
+        self.instr = instr
+
+    def formatted(self, _: int) -> str:
+        return '\t' + self.instr.encoded
+
 class CommentInstr(Instr):
     def __init__(self, text: str):
-        self.size  = 0
+        self.len = 0
         self.instr = '// ' + text
 
-    @property
-    def formatted(self) -> str:
+    def formatted(self, _: int) -> str:
         return '\t' + self.instr
+
+class AlignmentInstr(Instr):
+    bits: int
+    fill: int
+
+    def __init__(self, bits: int, fill: int = 0):
+        self.bits = bits
+        self.fill = fill
+
+    def size(self, pc: int) -> int:
+        return (1 << self.bits) - (pc & ((1 << self.bits) - 1))
+
+    def formatted(self, pc: int) -> str:
+        buf = bytes([self.fill]) * self.size(pc)
+        return '\t' + Instruction.encode(buf, '.p2align %d, 0x%02x' % (self.bits, self.fill))
 
 REG_MAP = {
     'rax'  : ('MOVQ'  , 'AX'),
@@ -1478,12 +1474,11 @@ class BasicBlock:
         return '{BasicBlock %s}' % repr(self.name)
 
     @property
-    def size(self) -> int:
-        return sum((v.size for v in self.body), 0)
-
-    @property
     def last(self) -> Optional[Instr]:
         return next((v for v in reversed(self.body) if not isinstance(v, CommentInstr)), None)
+
+    def size_of(self, pc: int) -> int:
+        return functools.reduce(lambda p, v: p + v.size(pc + p), self.body, 0)
 
     def link_to(self, block: 'BasicBlock'):
         self.next = block
@@ -1574,28 +1569,15 @@ class CodeSection:
             if block.name == name:
                 return size
             else:
-                size += block.size + adj
+                size += block.size_of(size) + adj
         else:
             raise SyntaxError('unresolved reference to name: ' + name)
 
-    # it seems to not be able to specify function aligment inside the Go ASM so we
-    # need to replace the aligned instructions with unaligned one if either of it's
-    # operand is an RBP or RIP relative addressing memory operand
-
-    __instr_repl__ = {
-        'movdqa'  : 'movdqu',
-        'vmovdqa' : 'vmovdqu',
-        'vmovaps' : 'vmovups',
-        'vmovapd' : 'vmovupd',
-    }
-
-    def _check_align(self, instr: Instruction):
-        if instr.mnemonic in self.__instr_repl__:
-            for op in instr.operands:
-                if isinstance(op, Memory):
-                    if op.base is not None and op.base.reg in ('rip', 'rbp'):
-                        instr.mnemonic = self.__instr_repl__[instr.mnemonic]
-                        break
+    def _alloc_instr(self, instr: Instruction):
+        if not instr.is_branch_label:
+            self.block.body.append(X86Instr(instr))
+        else:
+            self.block.body.append(BranchInstr(instr))
 
     def _check_split(self, instr: Instruction):
         if instr.is_return:
@@ -1688,42 +1670,8 @@ class CodeSection:
 
     def instr(self, instr: Instruction):
         if not self.dead:
-            self._check_align(instr)
-            self.block.body.append(X86Instr(instr))
+            self._alloc_instr(instr)
             self._check_split(instr)
-
-    def layout(self):
-        adjs = [0] * len(self.blocks)
-        lens = [v.size for v in self.blocks]
-
-        # layout until no more adjustments available
-        while True:
-            last = adjs[:]
-            blks = self.blocks
-
-            # iterate through every block
-            for i in range(len(blks)):
-                blk = blks[i]
-                ins = blk.last
-
-                # check for labeled jumps
-                if self._is_rjump(ins):
-                    name = ins.instr.operands[0].name
-                    offs = self._find_label(name, adjs) - sum(adjs[:i] + lens[:i + 1], 0)
-                    size = ins.instr.encoded_size(offs)
-
-                    # check for jump instruction size
-                    if size != ins.size:
-                        adjs[i] = size - ins.size
-
-            # no adjustments anymore, stop iterating
-            if adjs == last:
-                break
-
-        # apply the size adjustment
-        for adj, blk in zip(adjs, self.blocks):
-            if self._is_rjump(blk.last):
-                blk.last.size += adj
 
     def stacksize(self, name: str) -> int:
         if name not in self.labels:
@@ -1732,6 +1680,7 @@ class CodeSection:
             return self._trace_block(self.labels[name])
 
 STUB_NAME = '__native_entry__'
+WITH_OFFS = os.getenv('ASM2ASM_DEBUG_OFFSET', '').lower() in ('1', 'yes', 'true')
 
 class Assembler:
     out  : List[str]
@@ -1824,6 +1773,14 @@ class Assembler:
         nb, fv = self._vfill('.space', args)
         self._emit(bytes([fv] * nb), '.space')
 
+    def _cmd_p2align(self, args: List[str]):
+        if len(args) == 1:
+            self.code.block.body.append(AlignmentInstr(self._eval(args[0])))
+        elif len(args) == 2:
+            self.code.block.body.append(AlignmentInstr(self._eval(args[0]), self._eval(args[1])))
+        else:
+            raise SyntaxError('.p2align takes 1 ~ 2 arguments')
+
     @functools.cached_property
     def _commands(self) -> dict:
         return {
@@ -1839,7 +1796,7 @@ class Assembler:
             '.asciz'                   : self._cmd_asciz,
             '.space'                   : self._cmd_space,
             '.globl'                   : self._cmd_nop,
-            '.p2align'                 : self._cmd_nop,
+            '.p2align'                 : self._cmd_p2align,
             '.section'                 : self._cmd_nop,
             '.data_region'             : self._cmd_nop,
             '.build_version'           : self._cmd_nop,
@@ -1904,16 +1861,14 @@ class Assembler:
                 rip += self._reloc_one(instr, rip)
 
     def _reloc_one(self, instr: Instr, rip: int) -> int:
-        if not isinstance(instr, X86Instr):
-            return instr.size
-        elif instr.instr.is_invoke and isinstance(instr.instr.operands[0], Label):
-            return self._reloc_invoke(instr.instr, rip)
-        elif instr.instr.is_branch_label:
-            return instr.size
+        if not isinstance(instr, (X86Instr, BranchInstr)):
+            return instr.size(rip)
+        elif instr.instr.is_branch_label and isinstance(instr.instr.operands[0], Label):
+            return self._reloc_branch(instr.instr, rip)
         else:
             return instr.resize(self._reloc_normal(instr.instr, rip))
 
-    def _reloc_invoke(self, instr: Instruction, rip: int) -> int:
+    def _reloc_branch(self, instr: Instruction, rip: int) -> int:
         instr.operands[0].resolve(self.code.get(instr.operands[0].name) - rip - instr.size)
         return instr.size
 
@@ -1944,9 +1899,16 @@ class Assembler:
     def _declare_body(self):
         self.out.append('TEXT ·%s(SB), NOSPLIT, $0' % STUB_NAME)
         self.out.append('\tNO_LOCAL_POINTERS')
-        self.code.layout()
         self._reloc()
-        self.out.extend(v.formatted for v in self.code.instrs)
+
+        # instruction buffer
+        pc = 0
+        ins = self.code.instrs
+
+        # dump every instruction
+        for v in ins:
+            self.out.append(('// +%d\n' % pc if WITH_OFFS else '') + v.formatted(pc))
+            pc += v.size(pc)
 
     def _declare_function(self, name: str, proto: Prototype):
         offs = 0
