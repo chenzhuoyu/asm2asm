@@ -1420,7 +1420,8 @@ class AlignmentInstr(Instr):
         self.fill = fill
 
     def size(self, pc: int) -> int:
-        return (1 << self.bits) - (pc & ((1 << self.bits) - 1))
+        mask = (1 << self.bits) - 1
+        return (mask - (pc & mask) + 1) & mask
 
     def formatted(self, pc: int) -> str:
         buf = bytes([self.fill]) * self.size(pc)
