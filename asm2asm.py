@@ -409,7 +409,7 @@ class Instruction:
 
         def __call__(self, *args, **kwargs):
             if len(args) != 1:
-                return self.op(*args, 1, **kwargs)
+                return self.op(*args, **kwargs)
             else:
                 return self.op(*args, 1, **kwargs)
 
