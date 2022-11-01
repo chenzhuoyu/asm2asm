@@ -389,19 +389,11 @@ class Instruction:
             self.comments and ' (%s)' % self.comments
         )
 
-    class INT3(x86_64.INT):
-        def __init__(self, *args, **kwargs):
-            super().__init__(3, *args, **kwargs)
+    class Basic:
+        @staticmethod
+        def INT3(*args, **kwargs):
+            return x86_64.INT(3, *args, **kwargs)
 
-    class VCMPEQPS(x86_64.VCMPPS):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*(args + (0x00,)), **kwargs)
-
-    class VCMPTRUEPS(x86_64.VCMPPS):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*(args + (0x0f,)), **kwargs)
-
-    class Special:
         @staticmethod
         def MOVQ(*args, **kwargs):
             if not any(isinstance(v, XMMRegister) for v in args):
@@ -409,9 +401,48 @@ class Instruction:
             else:
                 return x86_64.MOVQ(*args, **kwargs)
 
+    class BitShift:
+        op: Type[PInstr]
+
+        def __init__(self, op: Type[PInstr]):
+            self.op = op
+
+        def __call__(self, *args, **kwargs):
+            if len(args) != 1:
+                return self.op(*args, 1, **kwargs)
+            else:
+                return self.op(*args, 1, **kwargs)
+
+    class VectorCompare:
+        fn: int
+        op: Type[PInstr]
+
+        def __init__(self, op: Type[PInstr], fn: int):
+            self.fn = fn
+            self.op = op
+
+        def __call__(self, *args, **kwargs):
+            return self.op(*args, self.fn, **kwargs)
+
     __instr_map__ = {
-        'INT3'       : INT3,
-        'MOVQ'       : Special.MOVQ,
+        'INT3'       : Basic.INT3,
+        'SALB'       : BitShift(x86_64.SAL),
+        'SALW'       : BitShift(x86_64.SAL),
+        'SALL'       : BitShift(x86_64.SAL),
+        'SALQ'       : BitShift(x86_64.SAL),
+        'SARB'       : BitShift(x86_64.SAR),
+        'SARW'       : BitShift(x86_64.SAR),
+        'SARL'       : BitShift(x86_64.SAR),
+        'SARQ'       : BitShift(x86_64.SAR),
+        'SHLB'       : BitShift(x86_64.SHL),
+        'SHLW'       : BitShift(x86_64.SHL),
+        'SHLL'       : BitShift(x86_64.SHL),
+        'SHLQ'       : BitShift(x86_64.SHL),
+        'SHRB'       : BitShift(x86_64.SHR),
+        'SHRW'       : BitShift(x86_64.SHR),
+        'SHRL'       : BitShift(x86_64.SHR),
+        'SHRQ'       : BitShift(x86_64.SHR),
+        'MOVQ'       : Basic.MOVQ,
         'CBTW'       : x86_64.CBW,
         'CWTL'       : x86_64.CWDE,
         'CLTQ'       : x86_64.CDQE,
@@ -427,12 +458,12 @@ class Instruction:
         'MOVSWQ'     : x86_64.MOVSX,
         'MOVSLQ'     : x86_64.MOVSXD,
         'MOVABSQ'    : x86_64.MOV,
-        'VCMPEQPS'   : VCMPEQPS,
-        'VCMPTRUEPS' : VCMPTRUEPS,
+        'VCMPEQPS'   : VectorCompare(x86_64.VCMPPS, 0x00),
+        'VCMPTRUEPS' : VectorCompare(x86_64.VCMPPS, 0x0f),
     }
 
     @functools.cached_property
-    def _instr(self) -> Type[PInstr]:
+    def _instr(self) -> Union[Type[PInstr], Callable[..., PInstr]]:
         name = self.mnemonic.upper()
         func = self.__instr_map__.get(name)
 
