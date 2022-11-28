@@ -1617,6 +1617,7 @@ class CodeSection:
 
     __instr_repl__ = {
         'movdqa'  : 'movdqu',
+        'movaps'  : 'movups',
         'vmovdqa' : 'vmovdqu',
         'vmovaps' : 'vmovups',
         'vmovapd' : 'vmovupd',
