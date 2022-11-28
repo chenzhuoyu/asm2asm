@@ -1611,6 +1611,25 @@ class CodeSection:
         else:
             self.block.body.append(BranchInstr(instr))
 
+    # it seems to not be able to specify stack aligment inside the Go ASM so we
+    # need to replace the aligned instructions with unaligned one if either of it's
+    # operand is an RBP relative addressing memory operand
+
+    __instr_repl__ = {
+        'movdqa'  : 'movdqu',
+        'vmovdqa' : 'vmovdqu',
+        'vmovaps' : 'vmovups',
+        'vmovapd' : 'vmovupd',
+    }
+
+    def _check_align(self, instr: Instruction):
+        if instr.mnemonic in self.__instr_repl__:
+            for op in instr.operands:
+                if isinstance(op, Memory):
+                    if op.base is not None and op.base.reg == 'rbp':
+                        instr.mnemonic = self.__instr_repl__[instr.mnemonic]
+                        break
+
     def _check_split(self, instr: Instruction):
         if instr.is_return:
             self.dead = True
@@ -1702,6 +1721,7 @@ class CodeSection:
 
     def instr(self, instr: Instruction):
         if not self.dead:
+            self._check_align(instr)
             self._alloc_instr(instr)
             self._check_split(instr)
 
