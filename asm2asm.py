@@ -27,6 +27,16 @@ from peachpy.x86_64.operand import RIPRelativeOffset
 from peachpy.x86_64.instructions import Instruction as PInstr
 from peachpy.x86_64.instructions import BranchInstruction
 
+from subroutine import Subroutine
+from subroutine import save_subr_refs
+from subroutine import make_subr_filename
+
+from parsing import Line
+from parsing import Token
+from parsing import Command
+from parsing import TokenKind
+from parsing import Expression
+
 ### Instruction Parser (GAS Syntax) ###
 
 class Label:
@@ -183,13 +193,6 @@ Displacement = Union[
     Reference,
 ]
 
-TOKEN_END  = 0
-TOKEN_REG  = 1
-TOKEN_IMM  = 2
-TOKEN_NUM  = 3
-TOKEN_NAME = 4
-TOKEN_PUNC = 5
-
 REGISTERS = {
     'rax'   , 'eax'   , 'ax'    , 'al'    , 'ah'   ,
     'rbx'   , 'ebx'   , 'bx'    , 'bl'    , 'bh'   ,
@@ -222,54 +225,6 @@ REGISTERS = {
     'zmm24' , 'zmm25' , 'zmm26' , 'zmm27' , 'zmm28' , 'zmm29' , 'zmm30' , 'zmm31' ,
     'rip'   ,
 }
-
-class Token:
-    tag: int
-    val: Union[int, str]
-
-    def __init__(self, tag: int, val: Union[int, str]):
-        self.val = val
-        self.tag = tag
-
-    @classmethod
-    def end(cls):
-        return cls(TOKEN_END, '')
-
-    @classmethod
-    def reg(cls, reg: str):
-        return cls(TOKEN_REG, reg)
-
-    @classmethod
-    def imm(cls, imm: int):
-        return cls(TOKEN_IMM, imm)
-
-    @classmethod
-    def num(cls, num: int):
-        return cls(TOKEN_NUM, num)
-
-    @classmethod
-    def name(cls, name: str):
-        return cls(TOKEN_NAME, name)
-
-    @classmethod
-    def punc(cls, punc: str):
-        return cls(TOKEN_PUNC, punc)
-
-    def __repr__(self):
-        if self.tag == TOKEN_END:
-            return '<END>'
-        elif self.tag == TOKEN_REG:
-            return '<REG %s>' % self.val
-        elif self.tag == TOKEN_IMM:
-            return '<IMM %d>' % self.val
-        elif self.tag == TOKEN_NUM:
-            return '<NUM %d>' % self.val
-        elif self.tag == TOKEN_NAME:
-            return '<NAME %s>' % repr(self.val)
-        elif self.tag == TOKEN_PUNC:
-            return '<PUNC %s>' % repr(self.val)
-        else:
-            return '<UNK:%d %r>' % (self.tag, self.val)
 
 class Tokenizer:
     pos: int
@@ -689,7 +644,7 @@ class Instruction:
         ntk = lex.next()
 
         # the first token must be a name
-        if ntk.tag != TOKEN_NAME:
+        if ntk.tag != TokenKind.Name:
             raise SyntaxError('mnemonic expected, got ' + repr(ntk))
         else:
             return cls(ntk.val, cls._parse_operands(lex))
@@ -731,41 +686,41 @@ class Instruction:
 
     @classmethod
     def _parse_mend(cls, ntk: Token, base: Reg, index: Register, scale: int, disp: Disp) -> Operand:
-        if ntk.tag != TOKEN_PUNC or ntk.val != ')':
+        if ntk.tag != TokenKind.Punc or ntk.val != ')':
             raise SyntaxError('")" expected, got ' + repr(ntk))
         else:
             return Memory(base, disp, Index(index, scale))
 
     @classmethod
     def _parse_base(cls, lex: Tokenizer, ntk: Token, disp: Disp) -> Operand:
-        if ntk.tag == TOKEN_REG:
+        if ntk.tag == TokenKind.Reg:
             return cls._parse_idelim(lex, lex.next(), Register(ntk.val), disp)
-        elif ntk.tag == TOKEN_PUNC and ntk.val == ',':
+        elif ntk.tag == TokenKind.Punc and ntk.val == ',':
             return cls._parse_ibase(lex, lex.next(), None, disp)
         else:
             raise SyntaxError('register expected, got ' + repr(ntk))
 
     @classmethod
     def _parse_ibase(cls, lex: Tokenizer, ntk: Token, base: Reg, disp: Disp) -> Operand:
-        if ntk.tag != TOKEN_REG:
+        if ntk.tag != TokenKind.Reg:
             raise SyntaxError('register expected, got ' + repr(ntk))
         else:
             return cls._parse_sdelim(lex, lex.next(), base, Register(ntk.val), disp)
 
     @classmethod
     def _parse_idelim(cls, lex: Tokenizer, ntk: Token, base: Reg, disp: Disp) -> Operand:
-        if ntk.tag == TOKEN_END:
+        if ntk.tag == TokenKind.End:
             raise SyntaxError('unexpected EOF when parsing memory operands')
-        elif ntk.tag == TOKEN_PUNC and ntk.val == ')':
+        elif ntk.tag == TokenKind.Punc and ntk.val == ')':
             return Memory(base, disp, None)
-        elif ntk.tag == TOKEN_PUNC and ntk.val == ',':
+        elif ntk.tag == TokenKind.Punc and ntk.val == ',':
             return cls._parse_ibase(lex, lex.next(), base, disp)
         else:
             raise SyntaxError('"," or ")" expected, got ' + repr(ntk))
 
     @classmethod
     def _parse_iscale(cls, lex: Tokenizer, ntk: Token, base: Reg, index: Register, disp: Disp) -> Operand:
-        if ntk.tag != TOKEN_NUM:
+        if ntk.tag != TokenKind.Num:
             raise SyntaxError('integer expected, got ' + repr(ntk))
         elif ntk.val not in (1, 2, 4, 8):
             raise SyntaxError('indexing scale can only be 1, 2, 4 or 8')
@@ -774,44 +729,44 @@ class Instruction:
 
     @classmethod
     def _parse_sdelim(cls, lex: Tokenizer, ntk: Token, base: Reg, index: Register, disp: Disp) -> Operand:
-        if ntk.tag == TOKEN_END:
+        if ntk.tag == TokenKind.End:
             raise SyntaxError('unexpected EOF when parsing memory operands')
-        elif ntk.tag == TOKEN_PUNC and ntk.val == ')':
+        elif ntk.tag == TokenKind.Punc and ntk.val == ')':
             return Memory(base, disp, Index(index))
-        elif ntk.tag == TOKEN_PUNC and ntk.val == ',':
+        elif ntk.tag == TokenKind.Punc and ntk.val == ',':
             return cls._parse_iscale(lex, lex.next(), base, index, disp)
         else:
             raise SyntaxError('"," or ")" expected, got ' + repr(ntk))
 
     @classmethod
     def _parse_refmem(cls, lex: Tokenizer, ntk: Token, ref: str) -> Operand:
-        if ntk.tag == TOKEN_END:
+        if ntk.tag == TokenKind.End:
             return Label(ref)
-        elif ntk.tag == TOKEN_PUNC and ntk.val == '(':
+        elif ntk.tag == TokenKind.Punc and ntk.val == '(':
             return cls._parse_memory(lex, ntk, Reference(ref))
         else:
             raise SyntaxError('identifier must either be a label or a displacement reference')
 
     @classmethod
     def _parse_memory(cls, lex: Tokenizer, ntk: Token, disp: Optional[Displacement]) -> Operand:
-        if ntk.tag != TOKEN_PUNC or ntk.val != '(':
+        if ntk.tag != TokenKind.Punc or ntk.val != '(':
             raise SyntaxError('"(" expected, got ' + repr(ntk))
         else:
             return cls._parse_base(lex, lex.next(), disp)
 
     @classmethod
     def _parse_operand(cls, lex: Tokenizer, ntk: Token, can_indir: bool = True) -> Operand:
-        if ntk.tag == TOKEN_REG:
+        if ntk.tag == TokenKind.Reg:
             return Register(ntk.val)
-        elif ntk.tag == TOKEN_IMM:
+        elif ntk.tag == TokenKind.Imm:
             return Immediate(ntk.val)
-        elif ntk.tag == TOKEN_NUM:
+        elif ntk.tag == TokenKind.Num:
             return cls._parse_memory(lex, lex.next(), Immediate(ntk.val))
-        elif ntk.tag == TOKEN_NAME:
+        elif ntk.tag == TokenKind.Name:
             return cls._parse_refmem(lex, lex.next(), ntk.val)
-        elif ntk.tag == TOKEN_PUNC and ntk.val == '(':
+        elif ntk.tag == TokenKind.Punc and ntk.val == '(':
             return cls._parse_memory(lex, ntk, None)
-        elif ntk.tag == TOKEN_PUNC and ntk.val == '*' and can_indir:
+        elif ntk.tag == TokenKind.Punc and ntk.val == '*' and can_indir:
             return cls._parse_operand(lex, lex.next(), False)
         else:
             raise SyntaxError('invalid token: ' + repr(ntk))
@@ -822,7 +777,7 @@ class Instruction:
         ntk = lex.next()
 
         # check for empty operand
-        if ntk.tag == TOKEN_END:
+        if ntk.tag == TokenKind.End:
             return []
 
         # parse every operand
@@ -831,9 +786,9 @@ class Instruction:
             ntk = lex.next()
 
             # check for the ',' delimiter or the end of input
-            if ntk.tag == TOKEN_PUNC and ntk.val == ',':
+            if ntk.tag == TokenKind.Punc and ntk.val == ',':
                 ntk = lex.next()
-            elif ntk.tag != TOKEN_END:
+            elif ntk.tag != TokenKind.End:
                 raise SyntaxError('"," expected, got ' + repr(ntk))
             else:
                 return ret
@@ -1087,287 +1042,6 @@ class PrototypeMap(Dict[str, Prototype]):
         return pkg, ret
 
 ### Assembly Source Parser ###
-
-ESC_IDLE = 0    # escape parser is idleing
-ESC_ISTR = 1    # currently inside a string
-ESC_BKSL = 2    # encountered backslash, prepare for escape sequences
-ESC_HEX0 = 3    # expect the first hexadecimal character of a "\x" escape
-ESC_HEX1 = 4    # expect the second hexadecimal character of a "\x" escape
-ESC_OCT1 = 5    # expect the second octal character of a "\000" escape
-ESC_OCT2 = 6    # expect the third octal character of a "\000" escape
-
-class Command:
-    cmd  : str
-    args : List[Union[str, bytes]]
-
-    def __init__(self, cmd: str, args: List[Union[str, bytes]]):
-        self.cmd  = cmd
-        self.args = args
-
-    def __repr__(self):
-        return '<CMD %s %s>' % (self.cmd, ', '.join(map(repr, self.args)))
-
-    @classmethod
-    def parse(cls, src: str) -> 'Command':
-        val = src.split(None, 1)
-        cmd = val[0]
-
-        # no parameters
-        if len(val) == 1:
-            return cls(cmd, [])
-
-        # extract the argument string
-        idx = 0
-        esc = 0
-        pos = None
-        args = []
-        vstr = val[1]
-
-        # scan through the whole string
-        while idx < len(vstr):
-            nch = vstr[idx]
-            idx += 1
-
-            # mark the start of the argument
-            if pos is None:
-                pos = idx - 1
-
-            # encountered the delimiter outside of a string
-            if nch == ',' and esc == ESC_IDLE:
-                pos, p = None, pos
-                args.append(vstr[p:idx - 1].strip())
-
-            # start of a string
-            elif nch == '"' and esc == ESC_IDLE:
-                esc = ESC_ISTR
-
-            # end of string
-            elif nch == '"' and esc == ESC_ISTR:
-                esc = ESC_IDLE
-                pos, p = None, pos
-                args.append(vstr[p:idx].strip()[1:-1].encode('utf-8').decode('unicode_escape'))
-
-            # escape characters
-            elif nch == '\\' and esc == ESC_ISTR:
-                esc = ESC_BKSL
-
-            # hexadecimal escape characters (3 chars)
-            elif esc == ESC_BKSL and nch == 'x':
-                esc = ESC_HEX0
-
-            # octal escape characters (3 chars)
-            elif esc == ESC_BKSL and nch in string.octdigits:
-                esc = ESC_OCT1
-
-            # generic escape characters (single char)
-            elif esc == ESC_BKSL and nch in ('a', 'b', 'f', 'r', 'n', 't', 'v', '"', '\\'):
-                esc = ESC_ISTR
-
-            # invalid escape sequence
-            elif esc == ESC_BKSL:
-                raise SyntaxError('invalid escape character: ' + repr(nch))
-
-            # normal characters, simply advance to the next character
-            elif esc in (ESC_IDLE, ESC_ISTR):
-                pass
-
-            # hexadecimal escape characters
-            elif esc in (ESC_HEX0, ESC_HEX1) and nch.lower() in string.hexdigits:
-                esc = ESC_HEX1 if esc == ESC_HEX0 else ESC_ISTR
-
-            # invalid hexadecimal character
-            elif esc in (ESC_HEX0, ESC_HEX1):
-                raise SyntaxError('invalid hexdecimal character: ' + repr(nch))
-
-            # octal escape characters
-            elif esc in (ESC_OCT1, ESC_OCT2) and nch.lower() in string.octdigits:
-                esc = ESC_OCT2 if esc == ESC_OCT1 else ESC_ISTR
-
-            # at most 3 octal digits
-            elif esc in (ESC_OCT1, ESC_OCT2):
-                esc = ESC_ISTR
-
-            # illegal state, should not happen
-            else:
-                raise RuntimeError('illegal state: %d' % esc)
-
-        # check for the last argument
-        if pos is None:
-            return cls(cmd, args)
-
-        # add the last argument and build the command
-        args.append(vstr[pos:].strip())
-        return cls(cmd, args)
-
-class Expression:
-    pos: int
-    src: str
-
-    def __init__(self, src: str):
-        self.pos = 0
-        self.src = src
-
-    @property
-    def _ch(self) -> str:
-        return self.src[self.pos]
-
-    @property
-    def _eof(self) -> bool:
-        return self.pos >= len(self.src)
-
-    def _rch(self) -> str:
-        pos, self.pos = self.pos, self.pos + 1
-        return self.src[pos]
-
-    def _hex(self, ch: str) -> bool:
-        if len(ch) == 1 and ch[0] == '0':
-            return self._ch.lower() == 'x'
-        elif len(ch) <= 1 or ch[1].lower() != 'x':
-            return self._ch.isdigit()
-        else:
-            return self._ch in string.hexdigits
-
-    def _int(self, ch: str) -> Token:
-        while not self._eof and self._hex(ch):
-            ch += self._rch()
-        else:
-            if ch.lower().startswith('0x'):
-                return Token.num(int(ch, 16))
-            elif ch[0] == '0':
-                return Token.num(int(ch, 8))
-            else:
-                return Token.num(int(ch))
-
-    def _name(self, ch: str) -> Token:
-        while not self._eof and (self._ch == '_' or self._ch.isalnum()):
-            ch += self._rch()
-        else:
-            return Token.name(ch)
-
-    def _read(self, ch: str) -> Token:
-        if ch.isdigit():
-            return self._int(ch)
-        elif ch.isidentifier():
-            return self._name(ch)
-        elif ch in ('*', '<', '>') and not self._eof and self._ch == ch:
-            return Token.punc(self._rch() * 2)
-        elif ch in ('+', '-', '*', '/', '%', '&', '|', '^', '~', '(', ')'):
-            return Token.punc(ch)
-        else:
-            raise SyntaxError('invalid character: ' + repr(ch))
-
-    def _peek(self) -> Optional[Token]:
-        pos = self.pos
-        ret = self._next()
-        self.pos = pos
-        return ret
-
-    def _next(self) -> Optional[Token]:
-        while not self._eof and self._ch.isspace():
-            self.pos += 1
-        else:
-            return Token.end() if self._eof else self._read(self._rch())
-
-    def _grab(self, tk: Token, getvalue: Callable[[str], int]) -> int:
-        if tk.tag == TOKEN_NUM:
-            return tk.val
-        elif tk.tag == TOKEN_NAME:
-            return getvalue(tk.val)
-        else:
-            raise SyntaxError('integer or identifier expected, got ' + repr(tk))
-
-    __pred__ = [
-        {'<<', '>>'},
-        {'|'},
-        {'^'},
-        {'&'},
-        {'+', '-'},
-        {'*', '/', '%'},
-        {'**'},
-    ]
-
-    __binary__ = {
-        '+'  : lambda a, b: a + b,
-        '-'  : lambda a, b: a - b,
-        '*'  : lambda a, b: a * b,
-        '/'  : lambda a, b: a / b,
-        '%'  : lambda a, b: a % b,
-        '&'  : lambda a, b: a & b,
-        '^'  : lambda a, b: a ^ b,
-        '|'  : lambda a, b: a | b,
-        '<<' : lambda a, b: a << b,
-        '>>' : lambda a, b: a >> b,
-        '**' : lambda a, b: a ** b,
-    }
-
-    def _eval(self, op: str, v1: int, v2: int) -> int:
-        return self.__binary__[op](v1, v2)
-
-    def _nest(self, nest: int, getvalue: Callable[[str], int]) -> int:
-        ret = self._expr(0, nest + 1, getvalue)
-        ntk = self._next()
-
-        # it must follows with a ')' operator
-        if ntk.tag != TOKEN_PUNC or ntk.val != ')':
-            raise SyntaxError('")" expected, got ' + repr(ntk))
-        else:
-            return ret
-
-    def _unit(self, nest: int, getvalue: Callable[[str], int]) -> int:
-        tk = self._next()
-        tt, tv = tk.tag, tk.val
-
-        # check for unary operators
-        if tt == TOKEN_NUM:
-            return tv
-        elif tt == TOKEN_NAME:
-            return getvalue(tv)
-        elif tt == TOKEN_PUNC and tv == '(':
-            return self._nest(nest, getvalue)
-        elif tt == TOKEN_PUNC and tv == '+':
-            return self._unit(nest, getvalue)
-        elif tt == TOKEN_PUNC and tv == '-':
-            return -self._unit(nest, getvalue)
-        elif tt == TOKEN_PUNC and tv == '~':
-            return ~self._unit(nest, getvalue)
-        else:
-            raise SyntaxError('integer, unary operator or nested expression expected, got ' + repr(tk))
-
-    def _term(self, pred: int, nest: int, getvalue: Callable[[str], int]) -> int:
-        lv = self._expr(pred + 1, nest, getvalue)
-        tk = self._peek()
-
-        # scan to the end
-        while True:
-            tt = tk.tag
-            tv = tk.val
-
-            # encountered EOF
-            if tt == TOKEN_END:
-                return lv
-
-            # must be an operator here
-            if tt != TOKEN_PUNC:
-                raise SyntaxError('operator expected, got ' + repr(tk))
-
-            # check for the operator precedence
-            if tv not in self.__pred__[pred]:
-                return lv
-
-            # apply the operator
-            op = self._next().val
-            rv = self._expr(pred + 1, nest, getvalue)
-            lv = self._eval(op, lv, rv)
-            tk = self._peek()
-
-    def _expr(self, pred: int, nest: int, getvalue: Callable[[str], int]) -> int:
-        if pred >= len(self.__pred__):
-            return self._unit(nest, getvalue)
-        else:
-            return self._term(pred, nest, getvalue)
-
-    def eval(self, getvalue: Callable[[str], int]) -> int:
-        return self._expr(0, 0, getvalue)
 
 class Instr:
     len   : int                     = NotImplemented
@@ -1865,23 +1539,9 @@ class Assembler:
                op.index is None       and \
                isinstance(op.disp, Reference)
 
-    @staticmethod
-    def _remove_comments(line: str, *, st: str = 'normal') -> str:
-        for i, ch in enumerate(line):
-            if   st == 'normal' and ch == '/'        : st = 'slcomm'
-            elif st == 'normal' and ch == '\"'       : st = 'string'
-            elif st == 'normal' and ch in ('#', ';') : return line[:i]
-            elif st == 'slcomm' and ch == '/'        : return line[:i - 1]
-            elif st == 'slcomm'                      : st = 'normal'
-            elif st == 'string' and ch == '\"'       : st = 'normal'
-            elif st == 'string' and ch == '\\'       : st = 'escape'
-            elif st == 'escape'                      : st = 'string'
-        else:
-            return line
-
     def _parse(self, src: List[str]):
         for line in src:
-            line = self._remove_comments(line)
+            line = Line.remove_comments(line)
             line = line.strip()
 
             # skip empty lines
@@ -2031,65 +1691,6 @@ class Assembler:
         self._parse(src)
         self._declare(proto)
 
-GOOS = {
-    'aix',
-    'android',
-    'darwin',
-    'dragonfly',
-    'freebsd',
-    'hurd',
-    'illumos',
-    'js',
-    'linux',
-    'nacl',
-    'netbsd',
-    'openbsd',
-    'plan9',
-    'solaris',
-    'windows',
-    'zos',
-}
-
-GOARCH = {
-    '386',
-    'amd64',
-    'amd64p32',
-    'arm',
-    'armbe',
-    'arm64',
-    'arm64be',
-    'ppc64',
-    'ppc64le',
-    'mips',
-    'mipsle',
-    'mips64',
-    'mips64le',
-    'mips64p32',
-    'mips64p32le',
-    'ppc',
-    'riscv',
-    'riscv64',
-    's390',
-    's390x',
-    'sparc',
-    'sparc64',
-    'wasm',
-}
-
-def make_subr_filename(name: str) -> str:
-    name = os.path.basename(name)
-    base = os.path.splitext(name)[0].rsplit('_', 2)
-
-    # construct the new name
-    if base[-1] in GOOS:
-        return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
-    elif base[-1] not in GOARCH:
-        return '%s_subr.go' % '_'.join(base)
-    elif len(base) > 2 and base[-2] in GOOS:
-        return '%s_subr_%s_%s.go' % ('_'.join(base[:-2]), base[-2], base[-1])
-    else:
-        return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
-
 def main():
     src = []
     asm = Assembler()
@@ -2127,58 +1728,11 @@ def main():
     subr = make_subr_filename(sys.argv[1])
     subr = os.path.join(os.path.dirname(sys.argv[1]), subr)
 
-    # save the compiled code stub
-    with open(subr, 'w') as fp:
-        print('// +build !noasm !appengine', file = fp)
-        print('// Code generated by asm2asm, DO NOT EDIT.', file = fp)
-        print(file = fp)
-        print('package %s' % pkg, file = fp)
-        print(file = fp)
-
-        # the function stub
-        print('//go:nosplit', file = fp)
-        print('//go:noescape', file = fp)
-        print('//goland:noinspection ALL', file = fp)
-        print('func %s() uintptr' % STUB_NAME, file = fp)
-
-        # also save the actual function addresses if any
-        if asm.subr:
-            print(file = fp)
-            print('var (', file = fp)
-            mlen = max(len(s) for s in asm.subr)
-
-            # dump every function
-            for name, offs in asm.subr.items():
-                print('    _subr_%s = %s() + %d' % (name.ljust(mlen, ' '), STUB_NAME, offs), file = fp)
-
-            # dump the stack usages
-            print(')', file = fp)
-            print(file = fp)
-            print('const (', file = fp)
-
-            # dump every constant
-            for name in asm.subr:
-                print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
-
-            # assign subroutine offsets to '_' to mute the "unused" warnings
-            print(')', file = fp)
-            print(file = fp)
-            print('var (', file = fp)
-
-            # dump every function
-            for name in asm.subr:
-                print('    _ = _subr_%s' % name, file = fp)
-
-            # assign stack usages to '_' to mute the "unused" warnings
-            print(')', file = fp)
-            print(file = fp)
-            print('const (', file = fp)
-
-            # dump every constant
-            for name in asm.subr:
-                print('    _ = _stack_%s' % name, file = fp)
-            else:
-                print(')', file = fp)
+    # save the subroutines
+    save_subr_refs(subr, pkg, STUB_NAME, {
+        name: Subroutine(offs, asm.code.stacksize(name))
+        for name, offs in asm.subr.items()
+    })
 
 if __name__ == '__main__':
     main()

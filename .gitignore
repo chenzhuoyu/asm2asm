@@ -1,5 +1,8 @@
 /.idea/
 /.vscode/
+/example/.idea
+/example/example
+/example/neon
+/example/output
 *.pyc
 *.s
-*.go
