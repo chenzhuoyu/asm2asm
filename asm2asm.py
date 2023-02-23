@@ -480,6 +480,13 @@ class Instruction:
             raise SyntaxError('unknown instruction: ' + self.mnemonic)
         else:
             return func
+    
+    @property
+    def jmptab(self) -> Optional[str]:
+        if self.mnemonic == 'leaq' and isinstance(self.operands[0], Memory) and self.operands[0].base.reg == 'rip':
+            dis = self.operands[0].disp
+            if dis and dis.ref.find(_CLANG_JUMPTABLE_LABLE) != -1:
+                return dis.ref
 
     @property
     def _instr_size(self) -> Optional[int]:
@@ -674,6 +681,10 @@ class Instruction:
     @functools.cached_property
     def is_branch_jmp(self) -> bool:
         return self._instr is x86_64.JMP
+    
+    @functools.cached_property
+    def is_jmpq(self) -> bool:
+        return self.mnemonic == 'jmpq'
 
     @property
     def is_branch_label(self) -> bool:
@@ -873,13 +884,40 @@ class Parameter:
     def __repr__(self):
         return '<ARG %s(%d): %s>' % (self.name, self.size, self.reg)
 
+class Pcsp:
+    entry: int
+    out  : List[Tuple[int, int]]
+    pc   : int
+    sp   : int
+    
+    def __init__(self, entry: int):
+        self.out = []
+        self.entry = entry
+        self.pc = 0
+        self.sp = 0
+    
+    def __str__(self) -> str:
+        ret = '[][2]uint32{\n'
+        for pc, sp in self.out:
+            ret += '        {%d, %d},\n' % (pc, sp)
+        return ret + '    }'
+    
+    def sort(self):
+        self.out.sort(key=lambda x: x[0])
+    
+    def add(self, dsp: int):
+        self.sp += dsp
+        self.out.append((self.pc - self.entry, self.sp))
+
 class Prototype:
     args: List[Parameter]
     retv: Optional[Parameter]
+    pcsp: Optional[Pcsp]
 
     def __init__(self, retv: Optional[Parameter], args: List[Parameter]):
         self.retv = retv
         self.args = args
+        self.pcsp = None
 
     def __repr__(self):
         if self.retv is None:
@@ -1485,23 +1523,25 @@ class Counter:
         return val
 
 class BasicBlock:
-    pcsp: int
+    maxsp: int
     name: str
     weak: bool
+    jmptab: bool
     body: List[Instr]
-    prev: List['BasicBlock']
+    prevs: List['BasicBlock']
     next: Optional['BasicBlock']
     jump: Optional['BasicBlock']
 
-    def __init__(self, name: str, weak: bool = True):
-        self.pcsp = -1
+    def __init__(self, name: str, weak: bool = True, jmptab: bool = False):
+        self.maxsp = -1
         self.body = []
-        self.prev = []
+        self.prevs = []
         self.name = name
         self.weak = weak
         self.next = None
         self.jump = None
-
+        self.jmptab = jmptab
+            
     def __repr__(self):
         return '{BasicBlock %s}' % repr(self.name)
 
@@ -1514,27 +1554,39 @@ class BasicBlock:
 
     def link_to(self, block: 'BasicBlock'):
         self.next = block
-        block.prev.append(self)
+        block.prevs.append(self)
 
     def jump_to(self, block: 'BasicBlock'):
         self.jump = block
-        block.prev.append(self)
+        block.prevs.append(self)
 
     @classmethod
     def annonymous(cls) -> 'BasicBlock':
         return cls('// bb.%d' % Counter.next(), weak = False)
+
+_CLANG_JUMPTABLE_LABLE = 'LJTI'
 
 class CodeSection:
     dead   : bool
     export : bool
     blocks : List[BasicBlock]
     labels : Dict[str, BasicBlock]
+    jmptabs: Dict[str, List[BasicBlock]]
 
     def __init__(self):
         self.dead   = False
         self.labels = {}
         self.export = False
         self.blocks = [BasicBlock.annonymous()]
+        self.jmptabs = {}
+    
+    def get_jmptab(self, name: str) -> List[BasicBlock]:
+        return self.jmptabs.setdefault(name, [])
+    
+    def get_block(self, name: str) -> BasicBlock:
+        for block in self.blocks:
+            if block.name == name:
+                return block
 
     @property
     def block(self) -> BasicBlock:
@@ -1545,8 +1597,8 @@ class CodeSection:
         for block in self.blocks:
             yield from block.body
 
-    def _make(self, name: str):
-        return self.labels.setdefault(name, BasicBlock(name))
+    def _make(self, name: str, jmptab: bool = False):
+        return self.labels.setdefault(name, BasicBlock(name, jmptab = jmptab))
 
     def _next(self, link: BasicBlock):
         if self.dead:
@@ -1564,10 +1616,10 @@ class CodeSection:
         self.dead = True
         self.block.link_to(self._make(name))
 
-    def _split(self, name: str, block: BasicBlock):
+    def _split(self, name: str, block: BasicBlock, jmptab: bool = False):
         self.jump = True
         self.block.link_to(block)
-        self.block.jump_to(self._make(name))
+        self.block.jump_to(self._make(name, jmptab = jmptab))
         self.blocks.append(block)
 
     @staticmethod
@@ -1634,42 +1686,100 @@ class CodeSection:
     def _check_split(self, instr: Instruction):
         if instr.is_return:
             self.dead = True
+            
+        elif instr.is_jmpq:
+            # backtrace jump table from current block
+            prevs = [self.block]
+            visited = set()
+            # BFS
+            while len(prevs) > 0:
+                curb = prevs.pop()
+                if curb in visited:
+                    continue
+                else:
+                    visited.add(curb)
+                    
+                # backtrace instructions
+                for ins in reversed(curb.body):
+                    if isinstance(ins, X86Instr) and ins.instr.jmptab:
+                        self._split(ins.instr.jmptab, BasicBlock.annonymous(), jmptab = True)
+                        print(f'found leaq {ins} instruction for {instr}')
+                        return
+                    
+                if curb.prevs:
+                    prevs.extend(curb.prevs)
+                    
         elif instr.is_branch_label and instr.is_branch_jmp:
             self._kill(instr.operands[0].name)
+            
         elif instr.is_branch_label:
             self._split(instr.operands[0].name, BasicBlock.annonymous())
 
-    def _trace_block(self, bb: BasicBlock) -> int:
-        if bb.pcsp == -1:
-            return self._trace_nocache(bb)
-        elif bb.pcsp >= 0:
-            return bb.pcsp
+    def _trace_block(self, bb: BasicBlock, pcsp: Pcsp) -> int:
+        if bb.maxsp == -1:
+            ret = self._trace_nocache(bb, pcsp)
+            print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
+            return ret
+        elif bb.maxsp >= 0:
+            print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
+            return bb.maxsp
         else:
             return 0
 
-    def _trace_nocache(self, bb: BasicBlock) -> int:
-        bb.pcsp = -2
-        sp, term = self._trace_instructions(bb)
+    def _trace_nocache(self, bb: BasicBlock, pcsp: Pcsp) -> int:
+        bb.maxsp = -2
+        pc0, sp0 = pcsp.pc, pcsp.sp
+        
+        maxsp, term = self._trace_instructions(bb, pcsp)
 
         # this is a terminating block
         if term:
-            return sp
+            return maxsp
 
         # don't trace it's next block if it's an unconditional jump
-        a = self._trace_block(bb.jump) if bb.jump else 0
-        b = self._trace_block(bb.next) if bb.next else 0
-
+        a, b = 0, 0
+        pc, sp = pcsp.pc, pcsp.sp
+        
+        if bb.jump:
+            if bb.jump.jmptab:
+                print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                cases = self.get_jmptab(bb.jump.name)                    
+                for case in cases:
+                    print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                    nsp = self._trace_block(case, pcsp)
+                    pcsp.pc, pcsp.sp = pc, sp
+                    if nsp > a:
+                        a = nsp
+            else:
+                print(f'from {bb.name} trace jump {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                a = self._trace_block(bb.jump, pcsp)
+                pcsp.pc, pcsp.sp = pc, sp
+            
+        if bb.next: 
+            print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+            b = self._trace_block(bb.next, pcsp)
+        
+        pcsp.pc, pcsp.sp = pc0, sp0
         # select the maximum stack depth
-        bb.pcsp = sp + max(a, b)
-        return bb.pcsp
+        bb.maxsp = maxsp + max(a, b)
+        return bb.maxsp
 
-    def _trace_instructions(self, bb: BasicBlock) -> Tuple[int, bool]:
+    def _trace_instructions(self, bb: BasicBlock, pcsp: Pcsp) -> Tuple[int, bool]:
         cursp = 0
         maxsp = 0
         close = False
+        
+        pc = self.get(bb.name)
+        if pc:
+            pcsp.pc = pc
+                
+        print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
 
         # scan every instruction
         for ins in bb.body:
+            diff = 0
+            pcsp.pc += ins.size(pcsp.pc)
+            
             if isinstance(ins, X86Instr):
                 name = ins.instr.mnemonic
                 args = ins.instr.operands
@@ -1678,28 +1788,34 @@ class CodeSection:
                 if name == 'retq':
                     close = True
                 elif name == 'popq':
-                    cursp -= 8
+                    diff = -8
                 elif name == 'pushq':
-                    cursp += 8
+                    diff = 8
                 elif name == 'callq':
-                    cursp += 8
+                    diff = 8
                 elif name == 'addq' and self._is_spadj(ins.instr):
-                    cursp -= self._mk_align(args[0].val)
+                    diff = -self._mk_align(args[0].val)
                 elif name == 'subq' and self._is_spadj(ins.instr):
-                    cursp += self._mk_align(args[0].val)
+                    diff = self._mk_align(args[0].val)
                 elif name == 'andq' and self._is_spadj(ins.instr):
-                    cursp += self._mk_align(max(-args[0].val - 8, 0))
+                    diff = self._mk_align(max(-args[0].val - 8, 0))
 
+                cursp += diff
+                if diff != 0:
+                    pcsp.add(diff)
+                        
                 # update the max stack depth
                 if cursp > maxsp:
                     maxsp = cursp
 
         # trace successful
+        print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
         return maxsp, close
 
-    def get(self, key: str) -> int:
+    def get(self, key: str) -> Optional[int]:
         if key not in self.labels:
-            raise SyntaxError('unresolved reference to name: ' + key)
+            # raise SyntaxError('unresolved reference to name: ' + key)
+            return
         else:
             return self._find_label(key, itertools.repeat(0, len(self.blocks)))
 
@@ -1726,11 +1842,11 @@ class CodeSection:
             self._alloc_instr(instr)
             self._check_split(instr)
 
-    def stacksize(self, name: str) -> int:
+    def stacksize(self, name: str, pcsp: Optional[Pcsp] = None) -> int:
         if name not in self.labels:
             raise SyntaxError('undefined function: ' + name)
         else:
-            return self._trace_block(self.labels[name])
+            return self._trace_block(self.labels[name], pcsp)
 
 STUB_NAME = '__native_entry__'
 WITH_OFFS = os.getenv('ASM2ASM_DEBUG_OFFSET', '').lower() in ('1', 'yes', 'true')
@@ -1795,8 +1911,15 @@ class Assembler:
         elif not args[0].isidentifier():
             raise SyntaxError(repr(args[0]) + " is not a valid identifier")
         else:
-            self.vals[args[0]] = args[1]
+            key = args[0]
+            val = args[1]
+            self.vals[key] = val
             self._comment('.set ' + ', '.join(args))
+            # special case: clang-generated jump tables are always like '{block}_{table}'
+            jt = val.find(_CLANG_JUMPTABLE_LABLE)
+            if jt > 0:
+                tab = self.code.get_jmptab(val[jt:])
+                tab.append(self.code.get_block(val[:jt-1]))
 
     def _cmd_byte(self, args: List[str]):
         self._bytes('.byte', args, -0x80, 0xff, 1)
@@ -1967,7 +2090,8 @@ class Assembler:
         offs = 0
         subr = name[1:]
         addr = self.code.get(subr)
-        size = self.code.stacksize(subr)
+        proto.pcsp = Pcsp(addr)
+        size = self.code.stacksize(subr, proto.pcsp)        
 
         # function header and stack checking
         self.out.append('')
@@ -2029,6 +2153,8 @@ class Assembler:
         self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
         self.code.instr(Instruction('retq', []))
         self._parse(src)
+        print("jmptabs:")
+        print(self.code.jmptabs)
         self._declare(proto)
 
 GOOS = {
@@ -2159,6 +2285,17 @@ def main():
             # dump every constant
             for name in asm.subr:
                 print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
+            
+            print(')', file = fp)
+            print(file = fp)
+            print('var (', file = fp)
+            
+            # dump every pcsp
+            for name in asm.subr:
+                pname = '_' + name
+                if proto[pname].pcsp is not None:
+                    proto[pname].pcsp.sort()
+                    print(f'    _pcsp_{name} = %s' % proto[pname].pcsp, file = fp)
 
             # assign subroutine offsets to '_' to mute the "unused" warnings
             print(')', file = fp)
@@ -2168,7 +2305,7 @@ def main():
             # dump every function
             for name in asm.subr:
                 print('    _ = _subr_%s' % name, file = fp)
-
+                    
             # assign stack usages to '_' to mute the "unused" warnings
             print(')', file = fp)
             print(file = fp)
