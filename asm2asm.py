@@ -679,7 +679,7 @@ class Instruction:
             return False
 
     @functools.cached_property
-    def is_branch_jmp(self) -> bool:
+    def is_jmp(self) -> bool:
         return self._instr is x86_64.JMP
     
     @functools.cached_property
@@ -1527,12 +1527,13 @@ class BasicBlock:
     name: str
     weak: bool
     jmptab: bool
+    func: bool
     body: List[Instr]
     prevs: List['BasicBlock']
     next: Optional['BasicBlock']
     jump: Optional['BasicBlock']
 
-    def __init__(self, name: str, weak: bool = True, jmptab: bool = False):
+    def __init__(self, name: str, weak: bool = True, jmptab: bool = False, func: bool = False):
         self.maxsp = -1
         self.body = []
         self.prevs = []
@@ -1541,6 +1542,7 @@ class BasicBlock:
         self.next = None
         self.jump = None
         self.jmptab = jmptab
+        self.func = func
             
     def __repr__(self):
         return '{BasicBlock %s}' % repr(self.name)
@@ -1572,6 +1574,7 @@ class CodeSection:
     blocks : List[BasicBlock]
     labels : Dict[str, BasicBlock]
     jmptabs: Dict[str, List[BasicBlock]]
+    funcs  : Dict[str, BasicBlock]
 
     def __init__(self):
         self.dead   = False
@@ -1579,6 +1582,7 @@ class CodeSection:
         self.export = False
         self.blocks = [BasicBlock.annonymous()]
         self.jmptabs = {}
+        self.funcs = {}
     
     def get_jmptab(self, name: str) -> List[BasicBlock]:
         return self.jmptabs.setdefault(name, [])
@@ -1597,8 +1601,8 @@ class CodeSection:
         for block in self.blocks:
             yield from block.body
 
-    def _make(self, name: str, jmptab: bool = False):
-        return self.labels.setdefault(name, BasicBlock(name, jmptab = jmptab))
+    def _make(self, name: str, jmptab: bool = False, func: bool = False):
+        return self.labels.setdefault(name, BasicBlock(name, jmptab = jmptab, func = func))
 
     def _next(self, link: BasicBlock):
         if self.dead:
@@ -1616,11 +1620,13 @@ class CodeSection:
         self.dead = True
         self.block.link_to(self._make(name))
 
-    def _split(self, name: str, block: BasicBlock, jmptab: bool = False):
+    def _split(self, name: str, block: BasicBlock, jmptab: bool = False, func: bool = False) -> BasicBlock:
         self.jump = True
         self.block.link_to(block)
-        self.block.jump_to(self._make(name, jmptab = jmptab))
+        jmp = self._make(name, jmptab = jmptab, func = func)
+        self.block.jump_to(jmp)
         self.blocks.append(block)
+        return jmp
 
     @staticmethod
     def _mk_align(v: int) -> int:
@@ -1688,10 +1694,9 @@ class CodeSection:
             self.dead = True
             
         elif instr.is_jmpq:
-            # backtrace jump table from current block
+            # backtrace jump table from current block (BFS)
             prevs = [self.block]
             visited = set()
-            # BFS
             while len(prevs) > 0:
                 curb = prevs.pop()
                 if curb in visited:
@@ -1709,11 +1714,14 @@ class CodeSection:
                 if curb.prevs:
                     prevs.extend(curb.prevs)
                     
-        elif instr.is_branch_label and instr.is_branch_jmp:
-            self._kill(instr.operands[0].name)
-            
         elif instr.is_branch_label:
-            self._split(instr.operands[0].name, BasicBlock.annonymous())
+            if instr.is_jmp: # jmp
+                self._kill(instr.operands[0].name)
+            elif instr.is_invoke: # call
+                fname = instr.operands[0].name
+                self.funcs[fname] = self._split(fname, BasicBlock.annonymous(), func = True)
+            else: # jeq, ja, jae ...
+                self._split(instr.operands[0].name, BasicBlock.annonymous())
 
     def _trace_block(self, bb: BasicBlock, pcsp: Pcsp) -> int:
         if bb.maxsp == -1:
