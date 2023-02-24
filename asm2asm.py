@@ -912,12 +912,10 @@ class Pcsp:
 class Prototype:
     args: List[Parameter]
     retv: Optional[Parameter]
-    pcsp: Optional[Pcsp]
 
     def __init__(self, retv: Optional[Parameter], args: List[Parameter]):
         self.retv = retv
         self.args = args
-        self.pcsp = None
 
     def __repr__(self):
         if self.retv is None:
@@ -1574,7 +1572,7 @@ class CodeSection:
     blocks : List[BasicBlock]
     labels : Dict[str, BasicBlock]
     jmptabs: Dict[str, List[BasicBlock]]
-    funcs  : Dict[str, BasicBlock]
+    funcs  : Dict[str, Pcsp]
 
     def __init__(self):
         self.dead   = False
@@ -1620,13 +1618,11 @@ class CodeSection:
         self.dead = True
         self.block.link_to(self._make(name))
 
-    def _split(self, name: str, block: BasicBlock, jmptab: bool = False, func: bool = False) -> BasicBlock:
+    def _split(self, jmp: BasicBlock, link: BasicBlock):
         self.jump = True
-        self.block.link_to(block)
-        jmp = self._make(name, jmptab = jmptab, func = func)
+        self.block.link_to(link)
         self.block.jump_to(jmp)
-        self.blocks.append(block)
-        return jmp
+        self.blocks.append(link)
 
     @staticmethod
     def _mk_align(v: int) -> int:
@@ -1693,7 +1689,7 @@ class CodeSection:
         if instr.is_return:
             self.dead = True
             
-        elif instr.is_jmpq:
+        elif instr.is_jmpq: # jmpq
             # backtrace jump table from current block (BFS)
             prevs = [self.block]
             visited = set()
@@ -1707,7 +1703,8 @@ class CodeSection:
                 # backtrace instructions
                 for ins in reversed(curb.body):
                     if isinstance(ins, X86Instr) and ins.instr.jmptab:
-                        self._split(ins.instr.jmptab, BasicBlock.annonymous(), jmptab = True)
+                        jmp = self._make(ins.instr.jmptab, jmptab = True)
+                        self._split(jmp, BasicBlock.annonymous())
                         print(f'found leaq {ins} instruction for {instr}')
                         return
                     
@@ -1717,11 +1714,16 @@ class CodeSection:
         elif instr.is_branch_label:
             if instr.is_jmp: # jmp
                 self._kill(instr.operands[0].name)
+                
             elif instr.is_invoke: # call
                 fname = instr.operands[0].name
-                self.funcs[fname] = self._split(fname, BasicBlock.annonymous(), func = True)
+                jmp = self._make(fname, func = True)
+                self._split(jmp, BasicBlock.annonymous())
+                self.funcs[fname] = None
+                
             else: # jeq, ja, jae ...
-                self._split(instr.operands[0].name, BasicBlock.annonymous())
+                jmp = self._make(instr.operands[0].name)
+                self._split(jmp, BasicBlock.annonymous())
 
     def _trace_block(self, bb: BasicBlock, pcsp: Pcsp) -> int:
         if bb.maxsp == -1:
@@ -1736,6 +1738,13 @@ class CodeSection:
 
     def _trace_nocache(self, bb: BasicBlock, pcsp: Pcsp) -> int:
         bb.maxsp = -2
+        
+        if bb.name in self.funcs:
+            pcsp = Pcsp(self.get(bb.name))
+            if self.funcs[bb.name] is None:
+                self.funcs[bb.name] = pcsp
+                
+            
         pc0, sp0 = pcsp.pc, pcsp.sp
         
         maxsp, term = self._trace_instructions(bb, pcsp)
@@ -2098,8 +2107,9 @@ class Assembler:
         offs = 0
         subr = name[1:]
         addr = self.code.get(subr)
-        proto.pcsp = Pcsp(addr)
-        size = self.code.stacksize(subr, proto.pcsp)        
+        pcsp = Pcsp(addr)
+        size = self.code.stacksize(subr, pcsp)        
+        self.code.funcs[subr] = pcsp
 
         # function header and stack checking
         self.out.append('')
@@ -2299,11 +2309,10 @@ def main():
             print('var (', file = fp)
             
             # dump every pcsp
-            for name in asm.subr:
-                pname = '_' + name
-                if proto[pname].pcsp is not None:
-                    proto[pname].pcsp.sort()
-                    print(f'    _pcsp_{name} = %s' % proto[pname].pcsp, file = fp)
+            for name, pcsp in asm.code.funcs.items():
+                if pcsp is not None:
+                    pcsp.sort()
+                    print(f'    _pcsp_{name} = %s' % pcsp, file = fp)
 
             # assign subroutine offsets to '_' to mute the "unused" warnings
             print(')', file = fp)
