@@ -893,7 +893,7 @@ class Pcsp:
     def __init__(self, entry: int):
         self.out = []
         self.entry = entry
-        self.pc = 0
+        self.pc = entry
         self.sp = 0
     
     def __str__(self) -> str:
@@ -902,8 +902,15 @@ class Pcsp:
             ret += '        {%d, %d},\n' % (pc, sp)
         return ret + '    }'
     
-    def sort(self):
+    def optimize(self):
         self.out.sort(key=lambda x: x[0])
+        tmp = []
+        lpc, lsp = 0, 0
+        for pc, sp in self.out:
+            if pc != lpc and sp != lsp:
+                tmp.append((pc, sp))
+            lpc, lsp = pc, sp
+        self.out = tmp
     
     def add(self, dsp: int):
         self.sp += dsp
@@ -1600,6 +1607,10 @@ class CodeSection:
             yield from block.body
 
     def _make(self, name: str, jmptab: bool = False, func: bool = False):
+        if func:
+        #NOTICE: if it is a function, always set func to be True
+            if (old := self.labels.get(name)) and (old.func != func):
+                old.func = True
         return self.labels.setdefault(name, BasicBlock(name, jmptab = jmptab, func = func))
 
     def _next(self, link: BasicBlock):
@@ -1719,13 +1730,26 @@ class CodeSection:
                 fname = instr.operands[0].name
                 jmp = self._make(fname, func = True)
                 self._split(jmp, BasicBlock.annonymous())
-                self.funcs[fname] = None
                 
             else: # jeq, ja, jae ...
                 jmp = self._make(instr.operands[0].name)
                 self._split(jmp, BasicBlock.annonymous())
 
-    def _trace_block(self, bb: BasicBlock, pcsp: Pcsp) -> int:
+    def _trace_block(self, bb: BasicBlock, pcsp: Optional[Pcsp]) -> int:
+        if (pcsp is not None):
+            if bb.func and (bb.name not in self.funcs):  
+                # new pcsp for func
+                pcsp = Pcsp(self.get(bb.name))
+                self.funcs[bb.name] = pcsp
+                print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
+            elif bb.name in self.funcs:
+                print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
+                # already traced
+                pcsp = None
+            else:
+                print(f'not func for {bb.name}, continue to trace')
+        else:
+            print(f'none pcsp for {bb.name}')
         if bb.maxsp == -1:
             ret = self._trace_nocache(bb, pcsp)
             print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
@@ -1736,17 +1760,18 @@ class CodeSection:
         else:
             return 0
 
-    def _trace_nocache(self, bb: BasicBlock, pcsp: Pcsp) -> int:
+    def _trace_nocache(self, bb: BasicBlock, pcsp: Optional[Pcsp]) -> int:
         bb.maxsp = -2
         
-        if bb.name in self.funcs:
-            pcsp = Pcsp(self.get(bb.name))
-            if self.funcs[bb.name] is None:
-                self.funcs[bb.name] = pcsp
-                
-            
-        pc0, sp0 = pcsp.pc, pcsp.sp
+        # ## FIXME:
+        # if pcsp is None:
+        #     pcsp = Pcsp(0)
         
+        # make a fake object just for reducing redundant checking
+        if pcsp:
+            pc0, sp0 = pcsp.pc, pcsp.sp
+            #NOTICE: must mark pcsp at block entry because go only calculate delta value
+            pcsp.add(0)
         maxsp, term = self._trace_instructions(bb, pcsp)
 
         # this is a terminating block
@@ -1755,7 +1780,8 @@ class CodeSection:
 
         # don't trace it's next block if it's an unconditional jump
         a, b = 0, 0
-        pc, sp = pcsp.pc, pcsp.sp
+        if pcsp:
+            pc, sp = pcsp.pc, pcsp.sp
         
         if bb.jump:
             if bb.jump.jmptab:
@@ -1764,19 +1790,24 @@ class CodeSection:
                 for case in cases:
                     print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                     nsp = self._trace_block(case, pcsp)
-                    pcsp.pc, pcsp.sp = pc, sp
+                    if pcsp:
+                        pcsp.pc, pcsp.sp = pc, sp
                     if nsp > a:
                         a = nsp
             else:
-                print(f'from {bb.name} trace jump {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                dir = 'call' if bb.jump.func else 'jump'
+                print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 a = self._trace_block(bb.jump, pcsp)
-                pcsp.pc, pcsp.sp = pc, sp
+                if pcsp:
+                    pcsp.pc, pcsp.sp = pc, sp
             
         if bb.next: 
             print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
             b = self._trace_block(bb.next, pcsp)
         
-        pcsp.pc, pcsp.sp = pc0, sp0
+        if pcsp:
+            pcsp.pc, pcsp.sp = pc0, sp0
+            
         # select the maximum stack depth
         bb.maxsp = maxsp + max(a, b)
         return bb.maxsp
@@ -1785,17 +1816,14 @@ class CodeSection:
         cursp = 0
         maxsp = 0
         close = False
-        
-        pc = self.get(bb.name)
-        if pc:
-            pcsp.pc = pc
-                
+            
         print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
 
         # scan every instruction
         for ins in bb.body:
             diff = 0
-            pcsp.pc += ins.size(pcsp.pc)
+            if pcsp:
+                pcsp.pc += ins.size(pcsp.pc)
             
             if isinstance(ins, X86Instr):
                 name = ins.instr.mnemonic
@@ -1808,8 +1836,6 @@ class CodeSection:
                     diff = -8
                 elif name == 'pushq':
                     diff = 8
-                elif name == 'callq':
-                    diff = 8
                 elif name == 'addq' and self._is_spadj(ins.instr):
                     diff = -self._mk_align(args[0].val)
                 elif name == 'subq' and self._is_spadj(ins.instr):
@@ -1818,7 +1844,7 @@ class CodeSection:
                     diff = self._mk_align(max(-args[0].val - 8, 0))
 
                 cursp += diff
-                if diff != 0:
+                if pcsp and (diff != 0):
                     pcsp.add(diff)
                         
                 # update the max stack depth
@@ -1859,10 +1885,18 @@ class CodeSection:
             self._alloc_instr(instr)
             self._check_split(instr)
 
-    def stacksize(self, name: str, pcsp: Optional[Pcsp] = None) -> int:
+    def stacksize(self, name: str) -> int:
         if name not in self.labels:
             raise SyntaxError('undefined function: ' + name)
         else:
+            return self._trace_block(self.labels[name], None)
+        
+    def pcsp(self, name: str, entry: int) -> int:
+        if name not in self.labels:
+            raise SyntaxError('undefined function: ' + name)
+        else:
+            pcsp = Pcsp(entry)
+            self.labels[name].func = True
             return self._trace_block(self.labels[name], pcsp)
 
 STUB_NAME = '__native_entry__'
@@ -2107,9 +2141,7 @@ class Assembler:
         offs = 0
         subr = name[1:]
         addr = self.code.get(subr)
-        pcsp = Pcsp(addr)
-        size = self.code.stacksize(subr, pcsp)        
-        self.code.funcs[subr] = pcsp
+        size = self.code.pcsp(subr, addr)        
 
         # function header and stack checking
         self.out.append('')
@@ -2311,7 +2343,7 @@ def main():
             # dump every pcsp
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
-                    pcsp.sort()
+                    pcsp.optimize()
                     print(f'    _pcsp_{name} = %s' % pcsp, file = fp)
 
             # assign subroutine offsets to '_' to mute the "unused" warnings
