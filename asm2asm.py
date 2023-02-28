@@ -618,8 +618,17 @@ class Instruction:
             return self._encode_normal_instr()
         else:
             raise RuntimeError('invalid relative branching instruction')
+        
+    def _raw_branch_rel(self, rel: Label) -> bytes:
+        if rel.offs is not None:
+            return self._raw_normal_instr()
+        else:
+            raise RuntimeError('invalid relative branching instruction')
 
     def _encode_branch_mem(self, mem: Memory) -> str:
+        raise NotImplementedError('not implemented: memory indirect jump')
+    
+    def _raw_branch_mem(self, mem: Memory) -> bytes:
         raise NotImplementedError('not implemented: memory indirect jump')
 
     def _encode_branch_reg(self, reg: Register) -> str:
@@ -629,6 +638,14 @@ class Instruction:
             raise SyntaxError('invalid indirect jump for instruction: ' + self.mnemonic)
         else:
             return x86_64.JMP(reg.native).format('go')
+        
+    def _raw_branch_reg(self, reg: Register) -> bytes:
+        if reg.reg == 'rip':
+            raise SyntaxError('%rip cannot be used as a jump target')
+        elif self.mnemonic != 'jmpq':
+            raise SyntaxError('invalid indirect jump for instruction: ' + self.mnemonic)
+        else:
+            return x86_64.JMP(reg.native).encode()
 
     def _encode_branch_instr(self) -> str:
         if len(self.operands) != 1:
@@ -641,6 +658,18 @@ class Instruction:
             return self._encode_branch_reg(self.operands[0])
         else:
             raise RuntimeError('invalid operand type ' + repr(self.operands[0]))
+        
+    def _raw_branch_instr(self) -> str:
+        if len(self.operands) != 1:
+            raise RuntimeError('illegal branch instruction')
+        elif isinstance(self.operands[0], Label):
+            return self._raw_branch_rel(self.operands[0])
+        elif isinstance(self.operands[0], Memory):
+            return self._raw_branch_mem(self.operands[0])
+        elif isinstance(self.operands[0], Register):
+            return self._raw_branch_reg(self.operands[0])
+        else:
+            raise RuntimeError('invalid operand type ' + repr(self.operands[0]))
 
     def _encode_normal_instr(self) -> str:
         ops = self._encode_operands(False, 0)
@@ -651,6 +680,17 @@ class Instruction:
             return self.encode(self._encode_ins(ret), str(self))
         else:
             return self.encode(self._encode_ins(ret, force_rel32 = True), '%s, $%s(%%rip)' % (self, self.operands[0].offs))
+        
+    def _raw_normal_instr(self) -> str:
+        ops = self._encode_operands(False, 0)
+        ret = self._instr(*list(ops)[::-1])
+
+        # encode all instructions as raw bytes
+        if not self.is_branch_label:
+            return self._encode_ins(ret)
+        else:
+            return self._encode_ins(ret, force_rel32 = True)
+
 
     @property
     def size(self) -> int:
@@ -662,6 +702,12 @@ class Instruction:
             return self._encode_branch_instr()
         else:
             return self._encode_normal_instr()
+        
+    def raw(self) -> bytes:
+        if self.is_branch:
+            return self._raw_branch_instr()
+        else:
+            return self._raw_normal_instr()
 
     @functools.cached_property
     def is_return(self) -> bool:
@@ -851,13 +897,27 @@ class Instruction:
 
 ### Prototype Parser ###
 
-ARGS_ORDER = [
+ARGS_ORDER_C = [
     Register('rdi'),
     Register('rsi'),
     Register('rdx'),
     Register('rcx'),
     Register('r8'),
     Register('r9'),
+]
+
+ARGS_ORDER_GO = [
+    Register('rax'),
+    Register('rbx'),
+    Register('rcx'),
+    Register('rdi'),
+    Register('rsi'),
+    Register('r8'),
+]
+
+FIXED_REGS_GO = [
+    Register('r14'),
+    Register('xmm15')
 ]
 
 FPARGS_ORDER = [
@@ -874,15 +934,17 @@ FPARGS_ORDER = [
 class Parameter:
     name : str
     size : int
-    reg  : Register
+    creg : Register
+    goreg: Register
 
-    def __init__(self, name: str, size: int, reg: Register):
-        self.reg  = reg
+    def __init__(self, name: str, size: int, reg: Register, goreg: Register):
+        self.creg  = reg
+        self.goreg = reg
         self.name = name
         self.size = size
 
     def __repr__(self):
-        return '<ARG %s(%d): %s>' % (self.name, self.size, self.reg)
+        return '<ARG %s(%d): %s>' % (self.name, self.size, self.creg)
 
 class Pcsp:
     entry: int
@@ -964,9 +1026,10 @@ class PrototypeMap(Dict[str, Prototype]):
         return (((nb - 1) >> 3) + 1) << 3
 
     @classmethod
-    def _retv(cls, ret: str) -> Tuple[str, int, Register]:
+    def _retv(cls, ret: str) -> Tuple[str, int, Register, Register]:
         name, size, xmm = cls._args(ret)
-        return name, size, Register('xmm0') if xmm else Register('rax')
+        reg = Register('xmm0') if xmm else Register('rax')
+        return name, size, reg, reg
 
     @classmethod
     def _args(cls, arg: str, sv: str = '') -> Tuple[str, int, bool]:
@@ -1104,26 +1167,29 @@ class PrototypeMap(Dict[str, Prototype]):
                 args, alens, axmm = list(zip(*[cls._args(v.strip()) for v in args[:-1].split(',')]))
 
             # check for the result
-            regs = []
+            cregs = []
+            goregs = []
             idxs = [0, 0]
 
             # split the integer & floating point registers
             for xmm in axmm:
                 key = 0 if xmm else 1
-                seq = FPARGS_ORDER if xmm else ARGS_ORDER
+                seq = FPARGS_ORDER if xmm else ARGS_ORDER_C
+                goseq = FPARGS_ORDER if xmm else ARGS_ORDER_GO
 
                 # check the argument count
                 if idxs[key] >= len(seq):
                     raise cls._err("too many arguments, consider pack some into a pointer")
 
                 # add the register
-                regs.append(seq[idxs[key]])
+                cregs.append(seq[idxs[key]])
+                goregs.append(goseq[idxs[key]])
                 idxs[key] += 1
 
             # register the prototype
             ret[name] = Prototype(retv, [
-                Parameter(arg, size, reg)
-                for arg, size, reg in zip(args, alens, regs)
+                Parameter(arg, size, creg, goreg)
+                for arg, size, creg, goreg in zip(args, alens, cregs, goregs)
             ])
 
         # all done
@@ -1412,7 +1478,9 @@ class Expression:
     def eval(self, getvalue: Callable[[str], int]) -> int:
         return self._expr(0, 0, getvalue)
 
+
 class Instr:
+    ALIGN_WIDTH = 48
     len   : int                     = NotImplemented
     instr : Union[str, Instruction] = NotImplemented
 
@@ -1421,15 +1489,29 @@ class Instr:
 
     def formatted(self, pc: int) -> str:
         raise NotImplementedError
-
+    
+    @staticmethod
+    def raw_formatted(bs: bytes, comm: str, pc: int) -> str:
+        t = '\t'
+        if bs:
+            for b in bs:
+                t +='0x%02x, ' % b
+            if len(bs)<Instr.ALIGN_WIDTH:
+                t += '\b' * (Instr.ALIGN_WIDTH - len(bs))
+        return '%s//%s%s' % (t, ('0x%08x ' % pc) if pc else ' ', comm)
 class RawInstr(Instr):
-    def __init__(self, size: int, instr: str):
+    bs: bytes
+    def __init__(self, size: int, instr: str, bs: bytes):
         self.len = size
         self.instr = instr
+        self.bs = bs
 
     def formatted(self, _: int) -> str:
         return '\t' + self.instr
-
+    
+    def raw_formatted(self, pc: int) -> str:
+        return Instr.raw_formatted(self.bs, self.instr, pc)
+        
 class IntInstr(Instr):
     comm: str
     func: Callable[[], int]
@@ -1445,6 +1527,9 @@ class IntInstr(Instr):
 
     def formatted(self, _: int) -> str:
         return '\t' + self.instr
+    
+    def raw_formatted(self, pc: int) -> str:
+        return Instr.raw_formatted(self.func().to_bytes(self.len, 'little'), self.comm, pc)
 
 class X86Instr(Instr):
     def __init__(self, instr: Instruction):
@@ -1457,6 +1542,9 @@ class X86Instr(Instr):
 
     def formatted(self, _: int) -> str:
         return '\t' + str(self.instr.encoded)
+    
+    def raw_formatted(self, pc: int) -> str:
+        return Instr.raw_formatted(self.instr._raw_normal_instr(), str(self.instr), pc)
 
 class LabelInstr(Instr):
     def __init__(self, name: str):
@@ -1468,6 +1556,9 @@ class LabelInstr(Instr):
             return self.instr + ':'
         else:
             return '_LB_%08x: // %s' % (hash(self.instr) & 0xffffffff, self.instr)
+        
+    def raw_formatted(self, pc: int) -> str:
+        return Instr.raw_formatted(None, str(self.instr), pc)
 
 class BranchInstr(Instr):
     def __init__(self, instr: Instruction):
@@ -1477,6 +1568,9 @@ class BranchInstr(Instr):
     def formatted(self, _: int) -> str:
         return '\t' + self.instr.encoded
 
+    def raw_formatted(self, pc: int) -> str:
+        return Instr.raw_formatted(self.instr._raw_branch_instr(), str(self.instr), pc)
+    
 class CommentInstr(Instr):
     def __init__(self, text: str):
         self.len = 0
@@ -1485,6 +1579,9 @@ class CommentInstr(Instr):
     def formatted(self, _: int) -> str:
         return '\t' + self.instr
 
+    def raw_formatted(self, pc: int) -> str:
+        return  Instr.raw_formatted(None, str(self.instr), None)
+    
 class AlignmentInstr(Instr):
     bits: int
     fill: int
@@ -1500,6 +1597,10 @@ class AlignmentInstr(Instr):
     def formatted(self, pc: int) -> str:
         buf = bytes([self.fill]) * self.size(pc)
         return '\t' + Instruction.encode(buf, '.p2align %d, 0x%02x' % (self.bits, self.fill))
+    
+    def raw_formatted(self, pc: int) -> str:
+        buf = bytes([self.fill]) * self.size(pc)
+        return Instr.raw_formatted(buf, '.p2align %d, 0x%02x' % (self.bits, self.fill), pc)
 
 REG_MAP = {
     'rax'  : ('MOVQ'  , 'AX'),
@@ -1716,7 +1817,7 @@ class CodeSection:
                     if isinstance(ins, X86Instr) and ins.instr.jmptab:
                         jmp = self._make(ins.instr.jmptab, jmptab = True)
                         self._split(jmp, BasicBlock.annonymous())
-                        print(f'found leaq {ins} instruction for {instr}')
+                        # print(f'found leaq {ins} instruction for {instr}')
                         return
                     
                 if curb.prevs:
@@ -1741,21 +1842,21 @@ class CodeSection:
                 # new pcsp for func
                 pcsp = Pcsp(self.get(bb.name))
                 self.funcs[bb.name] = pcsp
-                print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
+                # print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
             elif bb.name in self.funcs:
-                print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
+                # print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
                 # already traced
                 pcsp = None
-            else:
-                print(f'not func for {bb.name}, continue to trace')
-        else:
-            print(f'none pcsp for {bb.name}')
+            # else:
+                # print(f'not func for {bb.name}, continue to trace')
+        # else:
+            # print(f'none pcsp for {bb.name}')
         if bb.maxsp == -1:
             ret = self._trace_nocache(bb, pcsp)
-            print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
+            # print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
             return ret
         elif bb.maxsp >= 0:
-            print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
+            # print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
             return bb.maxsp
         else:
             return 0
@@ -1785,10 +1886,10 @@ class CodeSection:
         
         if bb.jump:
             if bb.jump.jmptab:
-                print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                # print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 cases = self.get_jmptab(bb.jump.name)                    
                 for case in cases:
-                    print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                    # print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                     nsp = self._trace_block(case, pcsp)
                     if pcsp:
                         pcsp.pc, pcsp.sp = pc, sp
@@ -1796,13 +1897,13 @@ class CodeSection:
                         a = nsp
             else:
                 dir = 'call' if bb.jump.func else 'jump'
-                print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                # print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 a = self._trace_block(bb.jump, pcsp)
                 if pcsp:
                     pcsp.pc, pcsp.sp = pc, sp
             
         if bb.next: 
-            print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+            # print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
             b = self._trace_block(bb.next, pcsp)
         
         if pcsp:
@@ -1816,8 +1917,7 @@ class CodeSection:
         cursp = 0
         maxsp = 0
         close = False
-            
-        print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
+        # print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
 
         # scan every instruction
         for ins in bb.body:
@@ -1852,7 +1952,7 @@ class CodeSection:
                     maxsp = cursp
 
         # trace successful
-        print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
+        # print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
         return maxsp, close
 
     def get(self, key: str) -> Optional[int]:
@@ -1867,7 +1967,7 @@ class CodeSection:
 
     def emit(self, buf: bytes, comments: str = ''):
         if not self.dead:
-            self.block.body.append(RawInstr(len(buf), Instruction.encode(buf, comments or buf.hex())))
+            self.block.body.append(RawInstr(len(buf), Instruction.encode(buf, comments or buf.hex()), buf))
 
     def lazy(self, size: int, func: Callable[[], int], comments: str = ''):
         if not self.dead:
@@ -2120,7 +2220,10 @@ class Assembler:
         ref.resolve(self.code.get(ref.ref) - rip)
 
     def _declare(self, protos: PrototypeMap):
-        self._declare_body()
+        if output_raw:
+            self._declare_body_raw()
+        else:
+            self._declare_body()
         self._declare_functions(protos)
 
     def _declare_body(self):
@@ -2136,19 +2239,34 @@ class Assembler:
         for v in ins:
             self.out.append(('// +%d\n' % pc if WITH_OFFS else '') + v.formatted(pc))
             pc += v.size(pc)
+            
+    def _declare_body_raw(self):
+        self._reloc()
+
+        # instruction buffer
+        pc = 0
+        ins = self.code.instrs
+
+        # dump every instruction
+        for v in ins:
+            self.out.append(v.raw_formatted(pc))
+            pc += v.size(pc)
 
     def _declare_function(self, name: str, proto: Prototype):
         offs = 0
         subr = name[1:]
         addr = self.code.get(subr)
+        self.subr[subr] = addr
         size = self.code.pcsp(subr, addr)        
 
+        if output_raw:
+            return
+        
         # function header and stack checking
         self.out.append('')
         self.out.append('TEXT ·%s(SB), NOSPLIT | NOFRAME, $0 - %d' % (name, proto.argspace))
         self.out.append('\tNO_LOCAL_POINTERS')
-        self.subr[subr] = addr
-
+        
         # add stack check if needed
         if size != 0:
             self.out.append('')
@@ -2165,7 +2283,7 @@ class Assembler:
         # intialize all the arguments
         for arg in proto.args:
             offs += arg.size
-            op, reg = REG_MAP[arg.reg.reg]
+            op, reg = REG_MAP[arg.creg.reg]
             self.out.append('\t%s %s+%d(FP), %s' % (op, arg.name, offs - arg.size, reg))
 
         # the function starts at zero
@@ -2181,7 +2299,7 @@ class Assembler:
         # normal functions, call the real function, and return the result
         else:
             self.out.append('\tCALL ·%s+%d(SB)  // %s' % (STUB_NAME, addr, subr))
-            self.out.append('\t%s, %s+%d(FP)' % (' '.join(REG_MAP[proto.retv.reg.reg]), proto.retv.name, offs))
+            self.out.append('\t%s, %s+%d(FP)' % (' '.join(REG_MAP[proto.retv.creg.reg]), proto.retv.name, offs))
             self.out.append('\tRET')
 
         # add stack growing if needed
@@ -2203,8 +2321,8 @@ class Assembler:
         self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
         self.code.instr(Instruction('retq', []))
         self._parse(src)
-        print("jmptabs:")
-        print(self.code.jmptabs)
+        # print("jmptabs:")
+        # print(self.code.jmptabs)
         self._declare(proto)
 
 GOOS = {
@@ -2266,6 +2384,8 @@ def make_subr_filename(name: str) -> str:
     else:
         return '%s_subr_%s.go' % ('_'.join(base[:-1]), base[-1])
 
+output_raw = True
+
 def main():
     src = []
     asm = Assembler()
@@ -2285,19 +2405,32 @@ def main():
             src.extend(fp.read().splitlines())
 
     # convert the original sources
-    asm.out.append('// +build !noasm !appengine')
-    asm.out.append('// Code generated by asm2asm, DO NOT EDIT.')
-    asm.out.append('')
-    asm.out.append('#include "go_asm.h"')
-    asm.out.append('#include "funcdata.h"')
-    asm.out.append('#include "textflag.h"')
-    asm.out.append('')
+    if output_raw:
+        asm.out.append('// +build amd64')
+        asm.out.append('// Code generated by asm2asm, DO NOT EDIT.')
+        asm.out.append('')
+        asm.out.append('package %s' % pkg)
+        asm.out.append('')
+        ## native text
+        asm.out.append('var _text_%s = []byte{' % STUB_NAME)
+    else:
+        asm.out.append('// +build !noasm !appengine')
+        asm.out.append('// Code generated by asm2asm, DO NOT EDIT.')
+        asm.out.append('')
+        asm.out.append('#include "go_asm.h"')
+        asm.out.append('#include "funcdata.h"')
+        asm.out.append('#include "textflag.h"')
+        asm.out.append('')
+        
     asm.parse(src, proto)
 
     # save the converted result
     with open(sys.argv[1], 'w') as fp:
         for line in asm.out:
             print(line, file = fp)
+            
+        if output_raw:
+            print('}', file = fp)
 
     # calculate the subroutine stub file name
     subr = make_subr_filename(sys.argv[1])
