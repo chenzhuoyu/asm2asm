@@ -969,8 +969,15 @@ class Pcsp:
         tmp = []
         lpc, lsp = 0, 0
         for pc, sp in self.out:
+            # sp changed, push new record
             if pc != lpc and sp != lsp:
+                    tmp.append((pc, sp))
+            # sp unchanged, replace with new pc
+            if pc != lpc and sp == lsp:
+                if len(tmp) > 0:
+                    tmp.pop(-1)
                 tmp.append((pc, sp))
+                
             lpc, lsp = pc, sp
         self.out = tmp
     
@@ -1713,7 +1720,7 @@ class CodeSection:
             if (old := self.labels.get(name)) and (old.func != func):
                 old.func = True
         return self.labels.setdefault(name, BasicBlock(name, jmptab = jmptab, func = func))
-
+    
     def _next(self, link: BasicBlock):
         if self.dead:
             self.dead = False
@@ -1730,8 +1737,10 @@ class CodeSection:
         self.dead = True
         self.block.link_to(self._make(name))
 
-    def _split(self, jmp: BasicBlock, link: BasicBlock):
+    def _split(self, jmp: BasicBlock):
         self.jump = True
+        link = BasicBlock.annonymous()
+        self.labels[link.name] = link
         self.block.link_to(link)
         self.block.jump_to(jmp)
         self.blocks.append(link)
@@ -1815,8 +1824,7 @@ class CodeSection:
                 # backtrace instructions
                 for ins in reversed(curb.body):
                     if isinstance(ins, X86Instr) and ins.instr.jmptab:
-                        jmp = self._make(ins.instr.jmptab, jmptab = True)
-                        self._split(jmp, BasicBlock.annonymous())
+                        self._split(self._make(ins.instr.jmptab, jmptab = True))
                         # print(f'found leaq {ins} instruction for {instr}')
                         return
                     
@@ -1829,34 +1837,38 @@ class CodeSection:
                 
             elif instr.is_invoke: # call
                 fname = instr.operands[0].name
-                jmp = self._make(fname, func = True)
-                self._split(jmp, BasicBlock.annonymous())
+                self._split(self._make(fname, func = True))
                 
             else: # jeq, ja, jae ...
-                jmp = self._make(instr.operands[0].name)
-                self._split(jmp, BasicBlock.annonymous())
+                self._split(self._make(instr.operands[0].name))
 
     def _trace_block(self, bb: BasicBlock, pcsp: Optional[Pcsp]) -> int:
+        
         if (pcsp is not None):
             if bb.func and (bb.name not in self.funcs):  
                 # new pcsp for func
                 pcsp = Pcsp(self.get(bb.name))
                 self.funcs[bb.name] = pcsp
-                # print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
+                print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
             elif bb.name in self.funcs:
-                # print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
+                print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
                 # already traced
                 pcsp = None
-            # else:
-                # print(f'not func for {bb.name}, continue to trace')
-        # else:
-            # print(f'none pcsp for {bb.name}')
+            else:
+                # continue tracing, update the pc
+                pcsp.pc = self.get(bb.name)
+                print(f'not func for {bb.name}, continue to trace, pc {pcsp.pc}')
+                # NOTICE: must mark pcsp at block entry because go only calculate delta value
+                pcsp.add(0)
+        else:
+            print(f'none pcsp for {bb.name}')
+            
         if bb.maxsp == -1:
             ret = self._trace_nocache(bb, pcsp)
-            # print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
+            print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
             return ret
         elif bb.maxsp >= 0:
-            # print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
+            print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
             return bb.maxsp
         else:
             return 0
@@ -1871,8 +1883,7 @@ class CodeSection:
         # make a fake object just for reducing redundant checking
         if pcsp:
             pc0, sp0 = pcsp.pc, pcsp.sp
-            #NOTICE: must mark pcsp at block entry because go only calculate delta value
-            pcsp.add(0)
+            
         maxsp, term = self._trace_instructions(bb, pcsp)
 
         # this is a terminating block
@@ -1886,10 +1897,10 @@ class CodeSection:
         
         if bb.jump:
             if bb.jump.jmptab:
-                # print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 cases = self.get_jmptab(bb.jump.name)                    
                 for case in cases:
-                    # print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                    print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                     nsp = self._trace_block(case, pcsp)
                     if pcsp:
                         pcsp.pc, pcsp.sp = pc, sp
@@ -1897,13 +1908,13 @@ class CodeSection:
                         a = nsp
             else:
                 dir = 'call' if bb.jump.func else 'jump'
-                # print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 a = self._trace_block(bb.jump, pcsp)
                 if pcsp:
                     pcsp.pc, pcsp.sp = pc, sp
             
         if bb.next: 
-            # print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+            print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
             b = self._trace_block(bb.next, pcsp)
         
         if pcsp:
@@ -1917,7 +1928,7 @@ class CodeSection:
         cursp = 0
         maxsp = 0
         close = False
-        # print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
+        print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
 
         # scan every instruction
         for ins in bb.body:
@@ -1957,8 +1968,7 @@ class CodeSection:
 
     def get(self, key: str) -> Optional[int]:
         if key not in self.labels:
-            # raise SyntaxError('unresolved reference to name: ' + key)
-            return
+            raise SyntaxError('unresolved reference to name: ' + key)
         else:
             return self._find_label(key, itertools.repeat(0, len(self.blocks)))
 
@@ -2476,6 +2486,7 @@ def main():
             # dump every pcsp
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
+                    print(f'before optimize {pcsp}')
                     pcsp.optimize()
                     print(f'    _pcsp_{name} = %s' % pcsp, file = fp)
 
