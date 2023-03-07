@@ -1496,8 +1496,8 @@ class Instr:
         if bs:
             for b in bs:
                 t +='0x%02x, ' % b
-            if len(bs)<Instr.ALIGN_WIDTH:
-                t += '\b' * (Instr.ALIGN_WIDTH - len(bs))
+            # if len(bs)<Instr.ALIGN_WIDTH:
+            #     t += '\b' * (Instr.ALIGN_WIDTH - len(bs))
         return '%s//%s%s' % (t, ('0x%08x ' % pc) if pc else ' ', comm)
 class RawInstr(Instr):
     bs: bytes
