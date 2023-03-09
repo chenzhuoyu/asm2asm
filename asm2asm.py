@@ -1019,6 +1019,17 @@ class PrototypeMap(Dict[str, Prototype]):
     @staticmethod
     def _tk(s: str, p: str) -> bool:
         return s.startswith(p) and (s == p or s[len(p)].isspace())
+    
+    __puncs_ = {
+        '(': 1,
+        ')': 1,
+        ',': 1,
+        '*': 1,
+        '.': 1,
+    }
+    @classmethod
+    def _punc(cls, s: str) -> bool:
+        return s in cls.__puncs_
 
     @staticmethod
     def _err(msg: str) -> SyntaxError:
@@ -2482,7 +2493,7 @@ def main():
             
             # dump every entry
             print(file = fp)
-            print('var (', file = fp)
+            print('const (', file = fp)
             for name, _ in asm.code.funcs.items():
                 addr = asm.code.get(name)
                 if addr is not None:
@@ -2491,12 +2502,13 @@ def main():
             
             # dump every text size
             print(file = fp)
-            print('var (', file = fp)
+            print('const (', file = fp)
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
                     print(f'before optimize {pcsp}')
                     pcsp.optimize()
-                    print(f'    _size_{name} = %d' % pcsp.out[-1], file = fp)
+                    print(f'after optimize {pcsp}')
+                    print(f'    _size_{name} = %d' % pcsp.out[-1][0], file = fp)
             print(')', file = fp)
 
             # dump every pcsp
