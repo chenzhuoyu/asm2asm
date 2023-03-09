@@ -1020,13 +1020,6 @@ class PrototypeMap(Dict[str, Prototype]):
     def _tk(s: str, p: str) -> bool:
         return s.startswith(p) and (s == p or s[len(p)].isspace())
     
-    __puncs_ = {
-        '(': 1,
-        ')': 1,
-        ',': 1,
-        '*': 1,
-        '.': 1,
-    }
     @classmethod
     def _punc(cls, s: str) -> bool:
         return s in cls.__puncs_
@@ -2021,6 +2014,7 @@ class CodeSection:
             return self._trace_block(self.labels[name], pcsp)
 
 STUB_NAME = '__native_entry__'
+STUB_SIZE = 67
 WITH_OFFS = os.getenv('ASM2ASM_DEBUG_OFFSET', '').lower() in ('1', 'yes', 'true')
 
 class Assembler:
@@ -2466,23 +2460,32 @@ def main():
         print(file = fp)
 
         # the function stub
-        print('//go:nosplit', file = fp)
-        print('//go:noescape', file = fp)
-        print('//goland:noinspection ALL', file = fp)
-        print('func %s() uintptr' % STUB_NAME, file = fp)
+        # print('//go:nosplit', file = fp)
+        # print('//go:noescape', file = fp)
+        # print('//goland:noinspection ALL', file = fp)
+        print('var %s uintptr' % STUB_NAME, file = fp)
 
         # also save the actual function addresses if any
         if asm.subr:
+            
+            # dump exported function reference address
             print(file = fp)
             print('var (', file = fp)
             mlen = max(len(s) for s in asm.subr)
-
-            # dump every function
-            for name, offs in asm.subr.items():
+            for name, _ in asm.subr.items():
                 print('    _subr_%s uintptr' % (name.ljust(mlen, ' ')), file = fp)
+            print(')', file = fp)
+
+            # dump every function infor 
+            print(file = fp)
+            print('var asmList = []NativeFunc{', file = fp)
+            print('    {"%s", 0, %d, nil},' % (STUB_NAME, STUB_SIZE), file = fp)
+            for name, _ in asm.code.funcs.items():
+                print('    {"%s", _entry_%s, _size_%s, _pcsp_%s},' % (name, name, name, name), file = fp)
+            print('}', file = fp)
+            
 
             # dump the stack usages
-            print(')', file = fp)
             print(file = fp)
             print('const (', file = fp)
 
