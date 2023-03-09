@@ -2468,47 +2468,59 @@ def main():
 
             # dump every function
             for name, offs in asm.subr.items():
-                print('    _subr_%s = %s() + %d' % (name.ljust(mlen, ' '), STUB_NAME, offs), file = fp)
+                print('    _subr_%s uintptr' % (name.ljust(mlen, ' ')), file = fp)
 
             # dump the stack usages
             print(')', file = fp)
             print(file = fp)
             print('const (', file = fp)
 
-            # dump every constant
+            # dump max stack depth for exported functions
             for name in asm.subr:
                 print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
-            
             print(')', file = fp)
+            
+            # dump every entry
             print(file = fp)
             print('var (', file = fp)
+            for name, _ in asm.code.funcs.items():
+                addr = asm.code.get(name)
+                if addr is not None:
+                    print(f'    _entry_{name} = %d' % addr, file = fp)
+            print(')', file = fp)
             
-            # dump every pcsp
+            # dump every text size
+            print(file = fp)
+            print('var (', file = fp)
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
                     print(f'before optimize {pcsp}')
                     pcsp.optimize()
-                    print(f'    _pcsp_{name} = %s' % pcsp, file = fp)
-
-            # assign subroutine offsets to '_' to mute the "unused" warnings
+                    print(f'    _size_{name} = %d' % pcsp.out[-1], file = fp)
             print(')', file = fp)
+
+            # dump every pcsp
             print(file = fp)
             print('var (', file = fp)
-
-            # dump every function
+            for name, pcsp in asm.code.funcs.items():
+                if pcsp is not None:
+                    print(f'    _pcsp_{name} = %s' % pcsp, file = fp)
+            print(')', file = fp)
+            
+            # assign subroutine offsets to '_' to mute the "unused" warnings
+            print(file = fp)
+            print('var (', file = fp)
             for name in asm.subr:
                 print('    _ = _subr_%s' % name, file = fp)
-                    
-            # assign stack usages to '_' to mute the "unused" warnings
             print(')', file = fp)
-            print(file = fp)
-            print('const (', file = fp)
-
-            # dump every constant
-            for name in asm.subr:
-                print('    _ = _stack_%s' % name, file = fp)
-            else:
-                print(')', file = fp)
+            
+            # # dump every constant
+            # print(file = fp)
+            # print('const (', file = fp)
+            # for name in asm.subr:
+            #     print('    _ = _stack_%s' % name, file = fp)
+            # else:
+            #     print(')', file = fp)
 
 if __name__ == '__main__':
     main()
