@@ -965,6 +965,9 @@ class Pcsp:
         return ret + '    }'
     
     def optimize(self):
+        # push the last record
+        self.out.append((self.pc - self.entry, self.sp))
+        # sort by pc
         self.out.sort(key=lambda x: x[0])
         tmp = []
         lpc, lsp = 0, 0
@@ -972,7 +975,7 @@ class Pcsp:
             # sp changed, push new record
             if pc != lpc and sp != lsp:
                     tmp.append((pc, sp))
-            # sp unchanged, replace with new pc
+            # sp unchanged, replace with the higher pc
             if pc != lpc and sp == lsp:
                 if len(tmp) > 0:
                     tmp.pop(-1)
@@ -981,9 +984,10 @@ class Pcsp:
             lpc, lsp = pc, sp
         self.out = tmp
     
-    def add(self, dsp: int):
-        self.sp += dsp
+    def update(self, dpc: int, dsp: int):
+        self.pc += dpc
         self.out.append((self.pc - self.entry, self.sp))
+        self.sp += dsp
 
 class Prototype:
     args: List[Parameter]
@@ -1859,11 +1863,11 @@ class CodeSection:
                 # already traced
                 pcsp = None
             else:
-                # continue tracing, update the pc
+                # continue tracing, update the pcsp
                 pcsp.pc = self.get(bb.name)
                 print(f'not func for {bb.name}, continue to trace, pc {pcsp.pc}')
                 # NOTICE: must mark pcsp at block entry because go only calculate delta value
-                pcsp.add(0)
+                # pcsp.add(0)
         else:
             print(f'none pcsp for {bb.name}')
             
@@ -1937,8 +1941,6 @@ class CodeSection:
         # scan every instruction
         for ins in bb.body:
             diff = 0
-            if pcsp:
-                pcsp.pc += ins.size(pcsp.pc)
             
             if isinstance(ins, X86Instr):
                 name = ins.instr.mnemonic
@@ -1959,8 +1961,8 @@ class CodeSection:
                     diff = self._mk_align(max(-args[0].val - 8, 0))
 
                 cursp += diff
-                if pcsp and (diff != 0):
-                    pcsp.add(diff)
+                if pcsp:
+                    pcsp.update(ins.size(pcsp.pc), diff)
                         
                 # update the max stack depth
                 if cursp > maxsp:
@@ -2508,9 +2510,9 @@ def main():
             print('const (', file = fp)
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
-                    print(f'before optimize {pcsp}')
+                    print(f'before {name} optimize {pcsp}')
                     pcsp.optimize()
-                    print(f'after optimize {pcsp}')
+                    print(f'after {name} optimize {pcsp}')
                     print(f'    _size_{name} = %d' % pcsp.out[-1][0], file = fp)
             print(')', file = fp)
 
