@@ -1098,7 +1098,7 @@ class PrototypeMap(Dict[str, Prototype]):
         pkg = ''
         ret = PrototypeMap()
         buf = src.splitlines()
-
+        
         # scan through all the lines
         while idx < len(buf):
             line = buf[idx]
@@ -1114,98 +1114,119 @@ class PrototypeMap(Dict[str, Prototype]):
                 idx, pkg = idx + 1, line[7:].strip().split()[0]
                 continue
 
-            # only cares about those functions that does not have bodies
-            if line[-1] == '{' or not cls._tk(line, 'func'):
+            if output_raw:
+                
+                # extract funcname like "[var ]{funcname} = func(..."
+                end = line.find('func(')
+                if end == -1:
+                    idx += 1
+                    continue
+                name = line[:end].strip()
+                if name.startswith('var '):
+                    name = name[4:].strip()
+                
+                # function names must be identifiers
+                if not name.isidentifier():
+                    raise cls._err('invalid function prototype: ' + name)
+                
+                # register a empty prototype
+                ret[name] = Prototype(None, [])
                 idx += 1
-                continue
+                
+            else:      
+                              
+                # only cares about those functions that does not have bodies
+                if line[-1] == '{' or not cls._tk(line, 'func'):
+                    idx += 1
+                    continue
 
-            # prevent type-aliasing primitive types into other names
-            if cls._tk(line, 'type'):
-                raise cls._err('please do not declare any type with in the companion .go file')
+                # prevent type-aliasing primitive types into other names
+                if cls._tk(line, 'type'):
+                    raise cls._err('please do not declare any type with in the companion .go file')
 
-            # find the next function declaration
-            decl, pos = cls._func(buf, idx)
-            func, idx = decl[4:].strip(), pos
+                # find the next function declaration
+                decl, pos = cls._func(buf, idx)
+                func, idx = decl[4:].strip(), pos
 
-            # find the beginning '('
-            nd = 1
-            pos = func.find('(')
+                # find the beginning '('
+                nd = 1
+                pos = func.find('(')
 
-            # must have a '('
-            if pos == -1:
-                raise cls._err('invalid function prototype: ' + decl)
+                # must have a '('
+                if pos == -1:
+                    raise cls._err('invalid function prototype: ' + decl)
 
-            # extract the name and signature
-            args = ''
-            name = func[:pos].strip()
-            func = func[pos + 1:].strip()
+                # extract the name and signature
+                args = ''
+                name = func[:pos].strip()
+                func = func[pos + 1:].strip()
 
-            # skip the method declaration
-            if not name:
-                continue
+                # skip the method declaration
+                if not name:
+                    continue
 
-            # function names must be identifiers
-            if not name.isidentifier():
-                raise cls._err('invalid function prototype: ' + decl)
+                # function names must be identifiers
+                if not name.isidentifier():
+                    raise cls._err('invalid function prototype: ' + decl)
 
-            # extract the argument list
-            while nd and func:
-                nch  = func[0]
-                func = func[1:]
+                # extract the argument list
+                while nd and func:
+                    nch  = func[0]
+                    func = func[1:]
 
-                # adjust the nesting level
-                nd   += cls._dv(nch)
-                args += nch
+                    # adjust the nesting level
+                    nd   += cls._dv(nch)
+                    args += nch
 
-            # check for EOF
-            if not nd:
-                func = func.strip()
-            else:
-                raise cls._err('unexpected EOF when parsing function prototype: ' + decl)
+                # check for EOF
+                if not nd:
+                    func = func.strip()
+                else:
+                    raise cls._err('unexpected EOF when parsing function prototype: ' + decl)
 
-            # check for multiple returns
-            if ',' in func:
-                raise cls._err('can only return a single value (detected by looking for "," within the return list)')
+                # check for multiple returns
+                if ',' in func:
+                    raise cls._err('can only return a single value (detected by looking for "," within the return list)')
 
-            # check for return signature
-            if not func:
-                retv = None
-            elif func[0] == '(' and func[-1] == ')':
-                retv = Parameter(*cls._retv(func[1:-1]))
-            else:
-                raise SyntaxError('badly formatted return argument (please use parenthesis and proper arguments naming): ' + func)
+                # check for return signature
+                if not func:
+                    retv = None
+                elif func[0] == '(' and func[-1] == ')':
+                    retv = Parameter(*cls._retv(func[1:-1]))
+                else:
+                    raise SyntaxError('badly formatted return argument (please use parenthesis and proper arguments naming): ' + func)
 
-            # extract the argument list
-            if not args[:-1]:
-                args, alens, axmm = [], [], []
-            else:
-                args, alens, axmm = list(zip(*[cls._args(v.strip()) for v in args[:-1].split(',')]))
+                # extract the argument list
+                if not args[:-1]:
+                    args, alens, axmm = [], [], []
+                else:
+                    args, alens, axmm = list(zip(*[cls._args(v.strip()) for v in args[:-1].split(',')]))
 
-            # check for the result
-            cregs = []
-            goregs = []
-            idxs = [0, 0]
+                # check for the result
+                cregs = []
+                goregs = []
+                idxs = [0, 0]
 
-            # split the integer & floating point registers
-            for xmm in axmm:
-                key = 0 if xmm else 1
-                seq = FPARGS_ORDER if xmm else ARGS_ORDER_C
-                goseq = FPARGS_ORDER if xmm else ARGS_ORDER_GO
+                # split the integer & floating point registers
+                for xmm in axmm:
+                    key = 0 if xmm else 1
+                    seq = FPARGS_ORDER if xmm else ARGS_ORDER_C
+                    goseq = FPARGS_ORDER if xmm else ARGS_ORDER_GO
 
-                # check the argument count
-                if idxs[key] >= len(seq):
-                    raise cls._err("too many arguments, consider pack some into a pointer")
+                    # check the argument count
+                    if idxs[key] >= len(seq):
+                        raise cls._err("too many arguments, consider pack some into a pointer")
 
-                # add the register
-                cregs.append(seq[idxs[key]])
-                goregs.append(goseq[idxs[key]])
-                idxs[key] += 1
+                    # add the register
+                    cregs.append(seq[idxs[key]])
+                    goregs.append(goseq[idxs[key]])
+                    idxs[key] += 1
 
-            # register the prototype
-            ret[name] = Prototype(retv, [
-                Parameter(arg, size, creg, goreg)
-                for arg, size, creg, goreg in zip(args, alens, cregs, goregs)
-            ])
+                # register the prototype
+                ret[name] = Prototype(retv, [
+                    Parameter(arg, size, creg, goreg)
+                    for arg, size, creg, goreg in zip(args, alens, cregs, goregs)
+                ])
 
         # all done
         return pkg, ret
@@ -2442,7 +2463,7 @@ def main():
     asm.parse(src, proto)
 
     # save the converted result
-    with open(sys.argv[1], 'w') as fp:
+    with open(os.path.splitext(sys.argv[1])[0] + '_text.go', 'w') as fp:
         for line in asm.out:
             print(line, file = fp)
             
@@ -2459,33 +2480,41 @@ def main():
         print('// Code generated by asm2asm, DO NOT EDIT.', file = fp)
         print(file = fp)
         print('package %s' % pkg, file = fp)
+        
         print(file = fp)
-
-        # the function stub
-        # print('//go:nosplit', file = fp)
-        # print('//go:noescape', file = fp)
-        # print('//goland:noinspection ALL', file = fp)
-        print('var %s uintptr' % STUB_NAME, file = fp)
+        print('import "github.com/bytedance/sonic/loader"', file = fp)
+        print(file = fp)
+        print('func init() {\n\tloader.WrapC(_text_%s, natives, stubs, "github.com/bytedance/sonic/native/avx2", "github.com/bytedance/sonic/native/avx2/native.c")\n}' % STUB_NAME, file = fp)
 
         # also save the actual function addresses if any
         if asm.subr:
+            # dump every go function stub
+            print(file = fp)
+            print('var stubs = []loader.GoFunc{', file = fp)
+            for name, _ in asm.subr.items():
+                print('    {"%s", _stack_%s, &_%s},' % (name, name, name), file = fp)
+            print('}', file = fp)
+
+            # dump every native function info
+            print(file = fp)
+            print('var natives = []loader.CFunc{', file = fp)
+            # insert native entry info
+            print('    {"%s", 0, %d, nil},' % (STUB_NAME, STUB_SIZE), file = fp)
+            for name, _ in asm.code.funcs.items():
+                print('    {"%s", _entry_%s, _size_%s, _pcsp_%s},' % (name, name, name, name), file = fp)
+            print('}', file = fp)
             
-            # dump exported function reference address
+            # native entry
+            print(file = fp)
+            print('var %s uintptr' % STUB_NAME, file = fp)
+            
+            # dump exported function entry
             print(file = fp)
             print('var (', file = fp)
             mlen = max(len(s) for s in asm.subr)
             for name, _ in asm.subr.items():
                 print('    _subr_%s uintptr' % (name.ljust(mlen, ' ')), file = fp)
             print(')', file = fp)
-
-            # dump every function infor 
-            print(file = fp)
-            print('var asmList = []NativeFunc{', file = fp)
-            print('    {"%s", 0, %d, nil},' % (STUB_NAME, STUB_SIZE), file = fp)
-            for name, _ in asm.code.funcs.items():
-                print('    {"%s", _entry_%s, _size_%s, _pcsp_%s},' % (name, name, name, name), file = fp)
-            print('}', file = fp)
-            
 
             # dump the stack usages
             print(file = fp)
@@ -2525,11 +2554,11 @@ def main():
             print(')', file = fp)
             
             # assign subroutine offsets to '_' to mute the "unused" warnings
-            print(file = fp)
-            print('var (', file = fp)
-            for name in asm.subr:
-                print('    _ = _subr_%s' % name, file = fp)
-            print(')', file = fp)
+            # print(file = fp)
+            # print('var (', file = fp)
+            # for name in asm.subr:
+            #     print('    _ = _subr_%s' % name, file = fp)
+            # print(')', file = fp)
             
             # # dump every constant
             # print(file = fp)
