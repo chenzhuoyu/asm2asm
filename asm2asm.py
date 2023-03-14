@@ -2463,7 +2463,8 @@ def main():
     asm.parse(src, proto)
 
     # save the converted result
-    with open(os.path.splitext(sys.argv[1])[0] + '_text.go', 'w') as fp:
+    asrc = os.path.splitext(sys.argv[1])[0]
+    with open(asrc[:asrc.rfind('_')] + '_text_amd64.go', 'w') as fp:
         for line in asm.out:
             print(line, file = fp)
             
@@ -2482,10 +2483,8 @@ def main():
         print('package %s' % pkg, file = fp)
         
         print(file = fp)
-        print('import "github.com/bytedance/sonic/loader"', file = fp)
-        print(file = fp)
-        print('func init() {\n\tloader.WrapC(_text_%s, natives, stubs, "github.com/bytedance/sonic/native/avx2", "github.com/bytedance/sonic/native/avx2/native.c")\n}' % STUB_NAME, file = fp)
-
+        print('import (\n\t`github.com/bytedance/sonic/loader`\n)', file = fp)
+        
         # also save the actual function addresses if any
         if asm.subr:
             # dump every go function stub
