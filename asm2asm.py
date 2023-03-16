@@ -1982,9 +1982,12 @@ class CodeSection:
                 elif name == 'subq' and self._is_spadj(ins.instr):
                     diff = self._mk_align(args[0].val)
                     cursp += diff
-                elif name == 'andq' and self._is_spadj(ins.instr):
-                    diff = self._mk_align(max(-args[0].val - 8, 0))
-                    cursp += diff
+                    
+                # FIXME: andq is usually used for aligment of memory address, we can't handle it correctly now
+                # elif name == 'andq' and self._is_spadj(ins.instr): 
+                #     diff = self._mk_align(max(-args[0].val - 8, 0))
+                #     cursp += diff
+                
                 elif name == 'callq':
                     #NOTICE: pcsp no need to update here
                     cursp += 8
