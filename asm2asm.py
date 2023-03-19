@@ -948,12 +948,14 @@ class Parameter:
 
 class Pcsp:
     entry: int
+    maxpc: int
     out  : List[Tuple[int, int]]
     pc   : int
     sp   : int
     
     def __init__(self, entry: int):
         self.out = []
+        self.maxpc = entry
         self.entry = entry
         self.pc = entry
         self.sp = 0
@@ -986,6 +988,8 @@ class Pcsp:
     
     def update(self, dpc: int, dsp: int):
         self.pc += dpc
+        if self.pc > self.maxpc:
+            self.maxpc = self.pc
         self.out.append((self.pc - self.entry, self.sp))
         self.sp += dsp
 
@@ -1827,13 +1831,17 @@ class CodeSection:
         'vmovapd' : 'vmovupd',
     }
 
-    def _check_align(self, instr: Instruction):
+    def _check_align(self, instr: Instruction) -> bool:
         if instr.mnemonic in self.__instr_repl__:
+            # NOTICE: since we need use unaligned instruction, thus SP can be fixed according to PC
             for op in instr.operands:
                 if isinstance(op, Memory):
-                    if op.base is not None and op.base.reg == 'rbp':
+                    if op.base is not None and (op.base.reg == 'rbp' or op.base.reg == 'rsp'):
                         instr.mnemonic = self.__instr_repl__[instr.mnemonic]
-                        break
+                        return False
+        elif instr.mnemonic == 'andq' and self._is_spadj(instr):
+            # NOTICE: since we always use unaligned instruction above, we don't need align SP
+            return True
 
     def _check_split(self, instr: Instruction):
         if instr.is_return:
@@ -1972,35 +1980,32 @@ class CodeSection:
                     close = True
                 elif name == 'popq':
                     diff = -8
-                    cursp -= 8
                 elif name == 'pushq':
                     diff = 8
-                    cursp += 8
                 elif name == 'addq' and self._is_spadj(ins.instr):
                     diff = -self._mk_align(args[0].val)
-                    cursp += diff
                 elif name == 'subq' and self._is_spadj(ins.instr):
                     diff = self._mk_align(args[0].val)
-                    cursp += diff
-                    
                 # FIXME: andq is usually used for aligment of memory address, we can't handle it correctly now
                 # elif name == 'andq' and self._is_spadj(ins.instr): 
                 #     diff = self._mk_align(max(-args[0].val - 8, 0))
                 #     cursp += diff
-                
-                elif name == 'callq':
+                cursp += diff
+
+                if name == 'callq':
                     #NOTICE: pcsp no need to update here
                     cursp += 8
-
-                if pcsp:
-                    pcsp.update(ins.size(pcsp.pc), diff)
                         
                 # update the max stack depth
                 if cursp > maxsp:
                     maxsp = cursp
+            
+            # update pcsp   
+            if pcsp:
+                pcsp.update(ins.size(pcsp.pc), diff)
 
         # trace successful
-        # print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
+        print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
         return maxsp, close
 
     def get(self, key: str) -> Optional[int]:
@@ -2028,7 +2033,8 @@ class CodeSection:
 
     def instr(self, instr: Instruction):
         if not self.dead:
-            self._check_align(instr)
+            if self._check_align(instr):
+                return
             self._alloc_instr(instr)
             self._check_split(instr)
 
@@ -2564,7 +2570,7 @@ def main():
                     print(f'before {name} optimize {pcsp}')
                     pcsp.optimize()
                     print(f'after {name} optimize {pcsp}')
-                    print(f'    _size_{name} = %d' % pcsp.out[-1][0], file = fp)
+                    print(f'    _size_{name} = %d' % (pcsp.maxpc - pcsp.entry), file = fp)
             print(')', file = fp)
 
             # dump every pcsp
