@@ -987,11 +987,11 @@ class Pcsp:
         self.out = tmp
     
     def update(self, dpc: int, dsp: int):
+        self.out.append((self.pc - self.entry, self.sp))
         self.pc += dpc
+        self.sp += dsp
         if self.pc > self.maxpc:
             self.maxpc = self.pc
-        self.out.append((self.pc - self.entry, self.sp))
-        self.sp += dsp
 
 class Prototype:
     args: List[Parameter]
