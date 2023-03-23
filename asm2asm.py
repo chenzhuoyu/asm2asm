@@ -1730,6 +1730,18 @@ class CodeSection:
         self.jmptabs = {}
         self.funcs = {}
     
+    @classmethod
+    def _dfs_jump_first(cls, bb: BasicBlock, visited: Dict[BasicBlock, bool], hook: Callable[[BasicBlock], bool]) -> bool:
+        if bb not in visited or not visited[bb]:
+            visited[bb] = True
+            if bb.jump and not cls._dfs_jump_first(bb.jump, visited, hook):
+                return False
+            if bb.next and not cls._dfs_jump_first(bb.next, visited, hook):
+                return False
+            return hook(bb)
+        else:
+            return True
+                
     def get_jmptab(self, name: str) -> List[BasicBlock]:
         return self.jmptabs.setdefault(name, [])
     
@@ -1877,10 +1889,9 @@ class CodeSection:
                 self._split(self._make(fname, func = True))
                 
             else: # jeq, ja, jae ...
-                self._split(self._make(instr.operands[0].name))
+                self._split(self._make(instr.operands[0].name)) 
 
     def _trace_block(self, bb: BasicBlock, pcsp: Optional[Pcsp]) -> int:
-        
         if (pcsp is not None):
             if bb.func and (bb.name not in self.funcs):  
                 # new pcsp for func
@@ -2051,6 +2062,18 @@ class CodeSection:
             pcsp = Pcsp(entry)
             self.labels[name].func = True
             return self._trace_block(self.labels[name], pcsp)
+        
+    def debug(self, ins: Instruction):
+        def inject(bb: BasicBlock):
+            pos = len(bb.body)>>1
+            if pos >= len(bb.body):
+                return
+            bb.body.insert(pos, ins)  
+            
+        visited = {}
+        
+        for _, bb in self.labels.items():
+            CodeSection._dfs_jump_first(bb, visited, inject)
 
 STUB_NAME = '__native_entry__'
 STUB_SIZE = 67
@@ -2375,6 +2398,7 @@ class Assembler:
         self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
         self.code.instr(Instruction('retq', []))
         self._parse(src)
+        self.code.debug(X86Instr(Instruction('ud2', [])))
         # print("jmptabs:")
         # print(self.code.jmptabs)
         self._declare(proto)
