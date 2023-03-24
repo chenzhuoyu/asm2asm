@@ -2064,7 +2064,8 @@ class CodeSection:
             return self._trace_block(self.labels[name], pcsp)
         
     def debug(self, ins: Instruction):
-        def inject(bb: BasicBlock):
+        
+        def inject(bb: BasicBlock) -> bool:
             pos = len(bb.body)>>1
             if pos >= len(bb.body):
                 return
@@ -2398,9 +2399,8 @@ class Assembler:
         self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
         self.code.instr(Instruction('retq', []))
         self._parse(src)
-        self.code.debug(X86Instr(Instruction('ud2', [])))
-        # print("jmptabs:")
-        # print(self.code.jmptabs)
+        if DEBUG:
+            self.code.debug(X86Instr(Instruction('ud2', [])))
         self._declare(proto)
 
 GOOS = {
@@ -2469,16 +2469,23 @@ def main():
     
     # check for arguments
     if len(sys.argv) < 3:
-        print('* usage: %s [-r] <output-file> <clang-asm> ...' % sys.argv[0], file = sys.stderr)
+        print('* usage: %s [-r|-d] <output-file> <clang-asm> ...' % sys.argv[0], file = sys.stderr)
         sys.exit(1)
 
-    # check if raw output mode is enabled
+    # check if optional flag is enabled
+    global DEBUG
     global OUTPUT_RAW
-    if len(sys.argv) >= 4 and sys.argv[1] == '-r':
-        OUTPUT_RAW = True
-        for i in range(1, len(sys.argv)-1):
-            sys.argv[i] = sys.argv[i + 1]  
-        sys.argv.pop()
+    if len(sys.argv) >= 4:
+        i = 0
+        while i<len(sys.argv):
+            flag = sys.argv[i]
+            if flag == '-r' or flag == '-d':
+                OUTPUT_RAW = True if flag == '-r' else False
+                DEBUG = True if flag == '-d' else False
+                for j in range(i, len(sys.argv)-1):
+                    sys.argv[j] = sys.argv[j + 1]  
+                sys.argv.pop()
+            i += 1
             
     # parse the prototype
     with open(os.path.splitext(sys.argv[1])[0] + '.go', 'r', newline = None) as fp:
