@@ -142,10 +142,12 @@ class Immediate:
 
 class Reference:
     ref: str
+    disp: int
     off: Optional[int]
 
-    def __init__(self, ref: str):
+    def __init__(self, ref: str, disp: int = 0):
         self.ref = ref
+        self.disp = disp
         self.off = None
 
     def __str__(self):
@@ -156,9 +158,9 @@ class Reference:
 
     def __repr__(self):
         if self.off is None:
-            return '{REF %s (unresolved)}' % self.ref
+            return '{REF %s + %d (unresolved)}' % (self.ref, self.disp)
         else:
-            return '{REF %s (offset: %d)}' % (self.ref, self.off)
+            return '{REF %s + %d (offset: %d)}' % (self.ref, self.disp, self.off)
 
     @property
     def offset(self) -> int:
@@ -168,7 +170,7 @@ class Reference:
             return self.off
 
     def resolve(self, off: int):
-        self.off = off
+        self.off = self.disp + off
 
 Operand = Union[
     Label,
@@ -343,6 +345,8 @@ class Tokenizer:
             return self._imm()
         elif ch == '-':
             return Token.num(-self._immv(self._rch()))
+        elif ch == '+':
+            return Token.num(self._immv(self._rch()))
         elif ch.isdigit():
             return Token.num(self._immv(ch))
         elif ch.isidentifier():
@@ -844,10 +848,14 @@ class Instruction:
     def _parse_refmem(cls, lex: Tokenizer, ntk: Token, ref: str) -> Operand:
         if ntk.tag == TOKEN_END:
             return Label(ref)
-        elif ntk.tag == TOKEN_PUNC and ntk.val == '(':
-            return cls._parse_memory(lex, ntk, Reference(ref))
-        else:
-            raise SyntaxError('identifier must either be a label or a displacement reference')
+        elif ntk.tag == TOKEN_PUNC and ntk.val == '(' :
+            return cls._parse_memory(lex, ntk, Reference(ref, 0))
+        elif ntk.tag == TOKEN_NUM:
+            ntk = lex.next()
+            if ntk.tag == TOKEN_PUNC and ntk.val == '(':
+                return cls._parse_refmem(lex, ntk, Reference(ref, ntk.val))
+        
+        raise SyntaxError(f'identifier "{ref}" must either be a label or a displacement reference')
 
     @classmethod
     def _parse_memory(cls, lex: Tokenizer, ntk: Token, disp: Optional[Displacement]) -> Operand:
@@ -1897,26 +1905,26 @@ class CodeSection:
                 # new pcsp for func
                 pcsp = Pcsp(self.get(bb.name))
                 self.funcs[bb.name] = pcsp
-                print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
+                # print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
             elif bb.name in self.funcs:
-                print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
+                # print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
                 # already traced
                 pcsp = None
             else:
                 # continue tracing, update the pcsp
                 pcsp.pc = self.get(bb.name)
-                print(f'not func for {bb.name}, continue to trace, pc {pcsp.pc}')
+                # print(f'not func for {bb.name}, continue to trace, pc {pcsp.pc}')
                 # NOTICE: must mark pcsp at block entry because go only calculate delta value
                 # pcsp.add(0)
-        else:
-            print(f'none pcsp for {bb.name}')
+        # else:
+            # print(f'none pcsp for {bb.name}')
             
         if bb.maxsp == -1:
             ret = self._trace_nocache(bb, pcsp)
-            print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
+            # print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
             return ret
         elif bb.maxsp >= 0:
-            print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
+            # print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
             return bb.maxsp
         else:
             return 0
@@ -1945,7 +1953,7 @@ class CodeSection:
         
         if bb.jump:
             if bb.jump.jmptab:
-                print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                # print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 cases = self.get_jmptab(bb.jump.name)                    
                 for case in cases:
                     print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
@@ -1956,13 +1964,13 @@ class CodeSection:
                         a = nsp
             else:
                 dir = 'call' if bb.jump.func else 'jump'
-                print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                # print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 a = self._trace_block(bb.jump, pcsp)
                 if pcsp:
                     pcsp.pc, pcsp.sp = pc, sp
             
         if bb.next: 
-            print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+            # print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
             b = self._trace_block(bb.next, pcsp)
         
         if pcsp:
@@ -1976,7 +1984,7 @@ class CodeSection:
         cursp = 0
         maxsp = 0
         close = False
-        print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
+        # print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
 
         # scan every instruction
         for ins in bb.body:
@@ -2016,7 +2024,7 @@ class CodeSection:
                 pcsp.update(ins.size(pcsp.pc), diff)
 
         # trace successful
-        print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
+        # print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
         return maxsp, close
 
     def get(self, key: str) -> Optional[int]:
@@ -2242,6 +2250,7 @@ class Assembler:
 
             # labels, resolve the offset
             if line[-1] == ':':
+                print(f'label: {line[:-1]}')
                 self.code.label(line[:-1])
                 continue
 
@@ -2284,18 +2293,18 @@ class Assembler:
         # relocate RIP relative operands
         for i, op in enumerate(ops):
             if self._is_rip_relative(op):
-                if self.code.has(op.disp.ref):
+                if self.code.has(str(op.disp.ref)):
                     self._reloc_static(op.disp, msg, rip + instr.size)
                 else:
-                    raise SyntaxError('unresolved reference to name ' + repr(op.disp.ref))
+                    raise SyntaxError('unresolved reference to name ' + str(op.disp.ref))
 
         # attach comments if any
         instr.comments = ', '.join(msg) or instr.comments
         return instr.size
 
     def _reloc_static(self, ref: Reference, msg: List[str], rip: int):
-        msg.append('%s(%%rip)' % ref.ref)
-        ref.resolve(self.code.get(ref.ref) - rip)
+        msg.append('%s+%d(%%rip)' % (ref.ref, ref.disp))
+        ref.resolve(self.code.get(str(ref.ref)) - rip)
 
     def _declare(self, protos: PrototypeMap):
         if OUTPUT_RAW:
