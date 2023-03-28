@@ -1901,21 +1901,20 @@ class CodeSection:
 
     def _trace_block(self, bb: BasicBlock, pcsp: Optional[Pcsp]) -> int:
         if (pcsp is not None):
-            if bb.func and (bb.name not in self.funcs):  
-                # new pcsp for func
-                pcsp = Pcsp(self.get(bb.name))
-                self.funcs[bb.name] = pcsp
-                # print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
-            elif bb.name in self.funcs:
+            if bb.name in self.funcs:
                 # print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
                 # already traced
                 pcsp = None
             else:
                 # continue tracing, update the pcsp
+                # NOTICE: must mark pcsp at block entry because go only calculate delta value
                 pcsp.pc = self.get(bb.name)
                 # print(f'not func for {bb.name}, continue to trace, pc {pcsp.pc}')
-                # NOTICE: must mark pcsp at block entry because go only calculate delta value
-                # pcsp.add(0)
+                if bb.func or pcsp.pc < pcsp.entry:  
+                    # new func
+                    pcsp = Pcsp(pcsp.pc)
+                    self.funcs[bb.name] = pcsp
+                    # print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
         # else:
             # print(f'none pcsp for {bb.name}')
             
@@ -1956,14 +1955,14 @@ class CodeSection:
                 # print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 cases = self.get_jmptab(bb.jump.name)                    
                 for case in cases:
-                    print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
+                    # print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                     nsp = self._trace_block(case, pcsp)
                     if pcsp:
                         pcsp.pc, pcsp.sp = pc, sp
                     if nsp > a:
                         a = nsp
             else:
-                dir = 'call' if bb.jump.func else 'jump'
+                # dir = 'call' if bb.jump.func else 'jump'
                 # print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 a = self._trace_block(bb.jump, pcsp)
                 if pcsp:
@@ -2250,7 +2249,6 @@ class Assembler:
 
             # labels, resolve the offset
             if line[-1] == ':':
-                print(f'label: {line[:-1]}')
                 self.code.label(line[:-1])
                 continue
 
