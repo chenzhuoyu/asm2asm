@@ -489,7 +489,7 @@ class Instruction:
     def jmptab(self) -> Optional[str]:
         if self.mnemonic == 'leaq' and isinstance(self.operands[0], Memory) and self.operands[0].base.reg == 'rip':
             dis = self.operands[0].disp
-            if dis and dis.ref.find(_CLANG_JUMPTABLE_LABLE) != -1:
+            if dis and dis.ref.find(CLANG_JUMPTABLE_LABLE) != -1:
                 return dis.ref
 
     @property
@@ -979,8 +979,9 @@ class Pcsp:
         self.out.append((self.pc - self.entry, self.sp))
         # sort by pc
         self.out.sort(key=lambda x: x[0])
-        tmp = []
-        lpc, lsp = 0, 0
+        # NOTICE: first pair {1, 0} to be compitable with golang
+        tmp = [(1, 0)]
+        lpc, lsp = 0, -1
         for pc, sp in self.out:
             # sp changed, push new record
             if pc != lpc and sp != lsp:
@@ -1720,7 +1721,7 @@ class BasicBlock:
     def annonymous(cls) -> 'BasicBlock':
         return cls('// bb.%d' % Counter.next(), weak = False)
 
-_CLANG_JUMPTABLE_LABLE = 'LJTI'
+CLANG_JUMPTABLE_LABLE = 'LJTI'
 
 class CodeSection:
     dead   : bool
@@ -1767,7 +1768,7 @@ class CodeSection:
         for block in self.blocks:
             yield from block.body
 
-    def _make(self, name: str, jmptab: bool = False, func: bool = False):
+    def _make(self, name: str, jmptab: bool = False, func: bool = False):    
         if func:
         #NOTICE: if it is a function, always set func to be True
             if (old := self.labels.get(name)) and (old.func != func):
@@ -1882,7 +1883,6 @@ class CodeSection:
                 for ins in reversed(curb.body):
                     if isinstance(ins, X86Instr) and ins.instr.jmptab:
                         self._split(self._make(ins.instr.jmptab, jmptab = True))
-                        # print(f'found leaq {ins} instruction for {instr}')
                         return
                     
                 if curb.prevs:
@@ -1902,28 +1902,21 @@ class CodeSection:
     def _trace_block(self, bb: BasicBlock, pcsp: Optional[Pcsp]) -> int:
         if (pcsp is not None):
             if bb.name in self.funcs:
-                # print(f'old pcsp for {bb.name}, pcsp {self.funcs[bb.name]}')
                 # already traced
                 pcsp = None
             else:
                 # continue tracing, update the pcsp
                 # NOTICE: must mark pcsp at block entry because go only calculate delta value
                 pcsp.pc = self.get(bb.name)
-                # print(f'not func for {bb.name}, continue to trace, pc {pcsp.pc}')
                 if bb.func or pcsp.pc < pcsp.entry:  
                     # new func
                     pcsp = Pcsp(pcsp.pc)
                     self.funcs[bb.name] = pcsp
-                    # print(f'new pcsp for {bb.name}, entry {pcsp.entry}')
-        # else:
-            # print(f'none pcsp for {bb.name}')
             
         if bb.maxsp == -1:
             ret = self._trace_nocache(bb, pcsp)
-            # print(f'end tracing block: {bb.name}, maxsp {ret}, pc {pcsp.pc}, sp {pcsp.sp}')
             return ret
         elif bb.maxsp >= 0:
-            # print(f'end caching block: {bb.name}, maxsp {bb.maxsp}')
             return bb.maxsp
         else:
             return 0
@@ -1952,24 +1945,19 @@ class CodeSection:
         
         if bb.jump:
             if bb.jump.jmptab:
-                # print(f'from {bb.name} trace jumptable {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 cases = self.get_jmptab(bb.jump.name)                    
                 for case in cases:
-                    # print(f'from {bb.jump.name} trace case {case.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                     nsp = self._trace_block(case, pcsp)
                     if pcsp:
                         pcsp.pc, pcsp.sp = pc, sp
                     if nsp > a:
                         a = nsp
             else:
-                # dir = 'call' if bb.jump.func else 'jump'
-                # print(f'from {bb.name} trace {dir} {bb.jump.name}, pc {pcsp.pc}, sp {pcsp.sp}')
                 a = self._trace_block(bb.jump, pcsp)
                 if pcsp:
                     pcsp.pc, pcsp.sp = pc, sp
             
         if bb.next: 
-            # print(f'from {bb.name} trace next {bb.next.name}, pc {pcsp.pc}, sp {pcsp.sp}')
             b = self._trace_block(bb.next, pcsp)
         
         if pcsp:
@@ -1983,7 +1971,6 @@ class CodeSection:
         cursp = 0
         maxsp = 0
         close = False
-        # print(f'begin {bb.name} trace instructions, pc {pcsp.pc}, sp {pcsp.sp}')
 
         # scan every instruction
         for ins in bb.body:
@@ -2004,14 +1991,15 @@ class CodeSection:
                     diff = -self._mk_align(args[0].val)
                 elif name == 'subq' and self._is_spadj(ins.instr):
                     diff = self._mk_align(args[0].val)
+                    
                 # FIXME: andq is usually used for aligment of memory address, we can't handle it correctly now
                 # elif name == 'andq' and self._is_spadj(ins.instr): 
                 #     diff = self._mk_align(max(-args[0].val - 8, 0))
-                #     cursp += diff
+                
                 cursp += diff
-
+                
+                #NOTICE: pcsp no need to update here
                 if name == 'callq':
-                    #NOTICE: pcsp no need to update here
                     cursp += 8
                         
                 # update the max stack depth
@@ -2023,7 +2011,6 @@ class CodeSection:
                 pcsp.update(ins.size(pcsp.pc), diff)
 
         # trace successful
-        # print(f'end {bb.name} trace instructions, maxsp {maxsp}, close {close}, pc {pcsp.pc}, sp {pcsp.sp}')
         return maxsp, close
 
     def get(self, key: str) -> Optional[int]:
@@ -2070,16 +2057,17 @@ class CodeSection:
             self.labels[name].func = True
             return self._trace_block(self.labels[name], pcsp)
         
-    def debug(self, ins: Instruction):
-        
+    def debug(self, pos: int, inss: List[Instruction]):
         def inject(bb: BasicBlock) -> bool:
-            pos = len(bb.body)>>1
+            if (not bb.func) and (bb.name not in self.funcs):
+                return True
+            nonlocal pos
             if pos >= len(bb.body):
                 return
-            bb.body.insert(pos, ins)  
-            
+            for ins in inss:
+                bb.body.insert(pos, ins)  
+                pos += 1
         visited = {}
-        
         for _, bb in self.labels.items():
             CodeSection._dfs_jump_first(bb, visited, inject)
 
@@ -2152,7 +2140,7 @@ class Assembler:
             self.vals[key] = val
             self._comment('.set ' + ', '.join(args))
             # special case: clang-generated jump tables are always like '{block}_{table}'
-            jt = val.find(_CLANG_JUMPTABLE_LABLE)
+            jt = val.find(CLANG_JUMPTABLE_LABLE)
             if jt > 0:
                 tab = self.code.get_jmptab(val[jt:])
                 tab.append(self.code.get_block(val[:jt-1]))
@@ -2406,8 +2394,12 @@ class Assembler:
         self.code.instr(Instruction('movq', [Register('rax'), Memory(Register('rsp'), Immediate(8), None)]))
         self.code.instr(Instruction('retq', []))
         self._parse(src)
-        if DEBUG:
-            self.code.debug(X86Instr(Instruction('ud2', [])))
+        # print("DEBUG...")
+        # self.code.debug(0, [
+        #     X86Instr(Instruction('int3', []))
+        #     # X86Instr(Instruction('xorq', [Register('rax'), Register('rax')])),
+        #     # X86Instr(Instruction('movq', [Memory(Register('rax'), Immediate(0), None), Register('rax')]))
+        # ])
         self._declare(proto)
 
 GOOS = {
@@ -2480,18 +2472,17 @@ def main():
         sys.exit(1)
 
     # check if optional flag is enabled
-    global DEBUG
     global OUTPUT_RAW
     if len(sys.argv) >= 4:
         i = 0
         while i<len(sys.argv):
             flag = sys.argv[i]
-            if flag == '-r' or flag == '-d':
-                OUTPUT_RAW = True if flag == '-r' else False
-                DEBUG = True if flag == '-d' else False
+            if flag == '-r':
+                OUTPUT_RAW = True
                 for j in range(i, len(sys.argv)-1):
                     sys.argv[j] = sys.argv[j + 1]  
                 sys.argv.pop()
+                continue
             i += 1
             
     # parse the prototype
@@ -2605,9 +2596,9 @@ def main():
             print('const (', file = fp)
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
-                    print(f'before {name} optimize {pcsp}')
+                    # print(f'before {name} optimize {pcsp}')
                     pcsp.optimize()
-                    print(f'after {name} optimize {pcsp}')
+                    # print(f'after {name} optimize {pcsp}')
                     print(f'    _size_{name} = %d' % (pcsp.maxpc - pcsp.entry), file = fp)
             print(')', file = fp)
 
