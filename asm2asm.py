@@ -2468,6 +2468,7 @@ def main():
 
     # check if optional flag is enabled
     global OUTPUT_RAW
+    OUTPUT_RAW = False
     if len(sys.argv) >= 4:
         i = 0
         while i<len(sys.argv):
@@ -2540,53 +2541,24 @@ def main():
         if OUTPUT_RAW:
             print(file = fp)
             print('import (\n\t`github.com/bytedance/sonic/loader`\n)', file = fp)
-            # dump every go function stub
+            
+            # dump every entry for all functions
             print(file = fp)
-            print('var Stubs = []loader.GoC{', file = fp)
-            for name, _ in asm.subr.items():
-                print('    {"%s", &_subr_%s, &_%s},' % (name, name, name), file = fp)
-            print('}', file = fp)
+            print('const (', file = fp)
+            for name in asm.code.funcs.keys():
+                addr = asm.code.get(name)
+                if addr is not None:
+                    print(f'    _entry_{name} = %d' % addr, file = fp)
+            print(')', file = fp)
+            
+            # dump max stack depth for all functions
+            print(file = fp)
+            print('const (', file = fp)
+            for name in asm.code.funcs.keys():
+                print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
+            print(')', file = fp)
 
-            print(file = fp)
-            print('var Funcs = []loader.CFunc{', file = fp)
-            # insert native entry info
-            print('    {"%s", 0, %d, 0, nil},' % (STUB_NAME, STUB_SIZE), file = fp)
-            # dump every native function info
-            for name, _ in asm.code.funcs.items():
-                print('    {"%s", _entry_%s, _size_%s, _stack_%s, _pcsp_%s},' % (name, name, name, name, name), file = fp)
-            print('}', file = fp)
-        
-        if not OUTPUT_RAW:
-            # native entry
-            print(file = fp)
-            print('func %s() uintptr' % STUB_NAME, file = fp)
-        
-        # dump exported function entry
-        print(file = fp)
-        print('var (', file = fp)
-        mlen = max(len(s) for s in asm.subr)
-        for name, _ in asm.subr.items():
-            print('    _subr_%s uintptr' % (name.ljust(mlen, ' ')), file = fp)
-        print(')', file = fp)
-
-        # dump max stack depth for all functions
-        print(file = fp)
-        print('const (', file = fp)
-        for name in asm.code.funcs:
-            print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
-        print(')', file = fp)
-        
-        # dump every entry
-        print(file = fp)
-        print('const (', file = fp)
-        for name, _ in asm.code.funcs.items():
-            addr = asm.code.get(name)
-            if addr is not None:
-                print(f'    _entry_{name} = %d' % addr, file = fp)
-        print(')', file = fp)
-        
-        if OUTPUT_RAW:
-            # dump every text size
+            # dump every text size for all functions
             print(file = fp)
             print('const (', file = fp)
             for name, pcsp in asm.code.funcs.items():
@@ -2596,16 +2568,47 @@ def main():
                     # print(f'after {name} optimize {pcsp}')
                     print(f'    _size_{name} = %d' % (pcsp.maxpc - pcsp.entry), file = fp)
             print(')', file = fp)
-
-            # dump every pcsp
+            
+            # dump every pcsp for all functions
             print(file = fp)
             print('var (', file = fp)
             for name, pcsp in asm.code.funcs.items():
                 if pcsp is not None:
                     print(f'    _pcsp_{name} = %s' % pcsp, file = fp)
             print(')', file = fp)
-        
-        if not OUTPUT_RAW:
+            
+            # insert native entry info
+            print(file = fp)
+            print('var Funcs = []loader.CFunc{', file = fp)
+            print('    {"%s", 0, %d, 0, nil},' % (STUB_NAME, STUB_SIZE), file = fp)
+            # dump every native function info for all functions
+            for name in asm.code.funcs.keys():
+                print('    {"%s", _entry_%s, _size_%s, _stack_%s, _pcsp_%s},' % (name, name, name, name, name), file = fp)
+            print('}', file = fp)
+
+        else:
+            # native entry for entry function
+            print(file = fp)
+            print('//go:nosplit', file = fp)
+            print('//go:noescape', file = fp)
+            print('//goland:noinspection ALL', file = fp)
+            print('func %s() uintptr' % STUB_NAME, file = fp)
+            
+            # dump exported function entry for exported functions
+            print(file = fp)
+            print('var (', file = fp)
+            mlen = max(len(s) for s in asm.subr)
+            for name, entry in asm.subr.items():
+                print('    _subr_%s uintptr = %s() + %d' % (name.ljust(mlen, ' '), STUB_NAME, entry), file = fp)
+            print(')', file = fp)
+
+            # dump max stack depth for exported functions
+            print(file = fp)
+            print('const (', file = fp)
+            for name in asm.subr.keys():
+                print('    _stack_%s = %d' % (name, asm.code.stacksize(name)), file = fp)
+            print(')', file = fp)
+
             # assign subroutine offsets to '_' to mute the "unused" warnings
             print(file = fp)
             print('var (', file = fp)
