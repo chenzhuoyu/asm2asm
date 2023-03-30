@@ -923,11 +923,6 @@ ARGS_ORDER_GO = [
     Register('r8'),
 ]
 
-FIXED_REGS_GO = [
-    Register('r14'),
-    Register('xmm15')
-]
-
 FPARGS_ORDER = [
     Register('xmm0'),
     Register('xmm1'),
